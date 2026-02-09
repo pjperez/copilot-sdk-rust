@@ -250,6 +250,6 @@ Finally, output the code as: PART1-PART2-PART3.
         }
     }
 
-    client.stop().await?;
+    client.stop().await;
     Ok(())
 }

@@ -76,6 +76,6 @@ async fn main() -> copilot_sdk::Result<()> {
         }
     }
 
-    client.stop().await?;
+    client.stop().await;
     Ok(())
 }

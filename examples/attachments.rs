@@ -67,6 +67,6 @@ fn divide(a: i32, b: i32) -> i32 {
     fs::remove_file(&sample_file).ok();
     fs::remove_dir(&temp_dir).ok();
 
-    client.stop().await?;
+    client.stop().await;
     Ok(())
 }

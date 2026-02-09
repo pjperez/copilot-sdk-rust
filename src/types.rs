@@ -6,6 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -46,6 +47,7 @@ pub enum SystemMessageMode {
 pub enum AttachmentType {
     File,
     Directory,
+    Selection,
 }
 
 /// Log level for the CLI.
@@ -423,7 +425,7 @@ pub struct UserMessageAttachment {
 ///     ToolResultObject::text(format!("Weather in {}: sunny", city))
 /// });
 /// session.register_tool_with_handler(tool, Some(handler)).await;
-/// client.stop().await?;
+/// client.stop().await;
 /// # Ok(())
 /// # }
 /// ```
@@ -454,6 +456,43 @@ impl Tool {
     /// Set the parameters JSON schema.
     pub fn schema(mut self, schema: serde_json::Value) -> Self {
         self.parameters_schema = schema;
+        self
+    }
+
+    /// Add a parameter to the tool's JSON schema.
+    ///
+    /// Builds the schema incrementally using the builder pattern.
+    pub fn parameter(
+        mut self,
+        name: impl Into<String>,
+        param_type: impl Into<String>,
+        description: impl Into<String>,
+        required: bool,
+    ) -> Self {
+        let name = name.into();
+
+        // Ensure schema has the right shape
+        if self.parameters_schema.get("type").is_none() {
+            self.parameters_schema["type"] = serde_json::json!("object");
+        }
+        if self.parameters_schema.get("properties").is_none() {
+            self.parameters_schema["properties"] = serde_json::json!({});
+        }
+
+        self.parameters_schema["properties"][&name] = serde_json::json!({
+            "type": param_type.into(),
+            "description": description.into(),
+        });
+
+        if required {
+            if self.parameters_schema.get("required").is_none() {
+                self.parameters_schema["required"] = serde_json::json!([]);
+            }
+            if let Some(arr) = self.parameters_schema["required"].as_array_mut() {
+                arr.push(serde_json::json!(name));
+            }
+        }
+
         self
     }
 
@@ -539,6 +578,204 @@ impl InfiniteSessionConfig {
 }
 
 // =============================================================================
+// Session Hooks
+// =============================================================================
+
+/// Input for the pre-tool-use hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreToolUseHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
+}
+
+/// Output for the pre-tool-use hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreToolUseHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_decision_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_args: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_output: Option<bool>,
+}
+
+/// Input for the post-tool-use hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostToolUseHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub tool_name: String,
+    pub tool_args: serde_json::Value,
+    pub tool_result: serde_json::Value,
+}
+
+/// Output for the post-tool-use hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostToolUseHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_output: Option<bool>,
+}
+
+/// Input for the user-prompt-submitted hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPromptSubmittedHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub prompt: String,
+}
+
+/// Output for the user-prompt-submitted hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserPromptSubmittedHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_output: Option<bool>,
+}
+
+/// Input for the session-start hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStartHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
+}
+
+/// Output for the session-start hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStartHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additional_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modified_config: Option<serde_json::Value>,
+}
+
+/// Input for the session-end hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEndHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub final_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Output for the session-end hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEndHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_output: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_actions: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_summary: Option<String>,
+}
+
+/// Input for the error-occurred hook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorOccurredHookInput {
+    pub timestamp: i64,
+    pub cwd: String,
+    pub error: String,
+    pub error_context: String,
+    pub recoverable: bool,
+}
+
+/// Output for the error-occurred hook.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ErrorOccurredHookOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_output: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_handling: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_count: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_notification: Option<String>,
+}
+
+/// Handler types for session hooks.
+pub type PreToolUseHandler = Arc<dyn Fn(PreToolUseHookInput) -> PreToolUseHookOutput + Send + Sync>;
+pub type PostToolUseHandler =
+    Arc<dyn Fn(PostToolUseHookInput) -> PostToolUseHookOutput + Send + Sync>;
+pub type UserPromptSubmittedHandler =
+    Arc<dyn Fn(UserPromptSubmittedHookInput) -> UserPromptSubmittedHookOutput + Send + Sync>;
+pub type SessionStartHandler =
+    Arc<dyn Fn(SessionStartHookInput) -> SessionStartHookOutput + Send + Sync>;
+pub type SessionEndHandler = Arc<dyn Fn(SessionEndHookInput) -> SessionEndHookOutput + Send + Sync>;
+pub type ErrorOccurredHandler =
+    Arc<dyn Fn(ErrorOccurredHookInput) -> ErrorOccurredHookOutput + Send + Sync>;
+
+/// Configuration for session hooks.
+///
+/// Hooks allow intercepting and modifying behavior at key points in the session lifecycle.
+#[derive(Clone, Default)]
+pub struct SessionHooks {
+    pub on_pre_tool_use: Option<PreToolUseHandler>,
+    pub on_post_tool_use: Option<PostToolUseHandler>,
+    pub on_user_prompt_submitted: Option<UserPromptSubmittedHandler>,
+    pub on_session_start: Option<SessionStartHandler>,
+    pub on_session_end: Option<SessionEndHandler>,
+    pub on_error_occurred: Option<ErrorOccurredHandler>,
+}
+
+impl SessionHooks {
+    /// Returns true if any hook handler is registered.
+    pub fn has_any(&self) -> bool {
+        self.on_pre_tool_use.is_some()
+            || self.on_post_tool_use.is_some()
+            || self.on_user_prompt_submitted.is_some()
+            || self.on_session_start.is_some()
+            || self.on_session_end.is_some()
+            || self.on_error_occurred.is_some()
+    }
+}
+
+impl std::fmt::Debug for SessionHooks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHooks")
+            .field("on_pre_tool_use", &self.on_pre_tool_use.is_some())
+            .field("on_post_tool_use", &self.on_post_tool_use.is_some())
+            .field(
+                "on_user_prompt_submitted",
+                &self.on_user_prompt_submitted.is_some(),
+            )
+            .field("on_session_start", &self.on_session_start.is_some())
+            .field("on_session_end", &self.on_session_end.is_some())
+            .field("on_error_occurred", &self.on_error_occurred.is_some())
+            .finish()
+    }
+}
+
+// =============================================================================
 // Session Configuration
 // =============================================================================
 
@@ -578,6 +815,23 @@ pub struct SessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub infinite_sessions: Option<InfiniteSessionConfig>,
 
+    /// Whether to request user input forwarding from the server.
+    /// When true, `userInput.request` callbacks will be sent to the SDK.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "requestUserInput")]
+    pub request_user_input: Option<bool>,
+
+    /// Reasoning effort level: "low", "medium", "high", or "xhigh".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
+    /// Working directory for the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+
+    /// Session hooks for pre/post tool use, session lifecycle, etc.
+    #[serde(skip)]
+    pub hooks: Option<SessionHooks>,
+
     /// If true and provider/model not explicitly set, load from `COPILOT_SDK_BYOK_*` env vars.
     ///
     /// Default: false (explicit configuration preferred over environment variables)
@@ -589,6 +843,8 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSessionConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -605,6 +861,26 @@ pub struct ResumeSessionConfig {
     pub disabled_skills: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none", rename = "requestPermission")]
     pub request_permission: Option<bool>,
+
+    /// Whether to request user input forwarding from the server.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "requestUserInput")]
+    pub request_user_input: Option<bool>,
+
+    /// Reasoning effort level: "low", "medium", "high", or "xhigh".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+
+    /// Working directory for the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+
+    /// If true, skip resuming and create a new session instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub disable_resume: bool,
+
+    /// Session hooks for pre/post tool use, session lifecycle, etc.
+    #[serde(skip)]
+    pub hooks: Option<SessionHooks>,
 
     /// If true and provider not explicitly set, load from `COPILOT_SDK_BYOK_*` env vars.
     ///
@@ -661,6 +937,12 @@ pub struct ClientOptions {
     pub auto_start: bool,
     pub auto_restart: bool,
     pub environment: Option<HashMap<String, String>>,
+    /// GitHub personal access token for authentication.
+    /// Cannot be used together with `cli_url`.
+    pub github_token: Option<String>,
+    /// Whether to use the logged-in user for auth.
+    /// Defaults to true when github_token is empty. Cannot be used with `cli_url`.
+    pub use_logged_in_user: Option<bool>,
 }
 
 impl Default for ClientOptions {
@@ -676,6 +958,8 @@ impl Default for ClientOptions {
             auto_start: true,
             auto_restart: true,
             environment: None,
+            github_token: None,
+            use_logged_in_user: None,
         }
     }
 }
@@ -744,9 +1028,24 @@ pub struct ModelCapabilities {
 
 /// What features a model supports.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelSupports {
     #[serde(default)]
     pub vision: bool,
+    #[serde(default)]
+    pub reasoning_effort: bool,
+}
+
+/// Vision limits for a model.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelVisionLimits {
+    #[serde(default)]
+    pub supported_media_types: Vec<String>,
+    #[serde(default)]
+    pub max_prompt_images: u32,
+    #[serde(default)]
+    pub max_prompt_image_size: u64,
 }
 
 /// Model limits.
@@ -757,6 +1056,8 @@ pub struct ModelLimits {
     pub max_prompt_tokens: Option<u32>,
     #[serde(default)]
     pub max_context_window_tokens: u32,
+    #[serde(default)]
+    pub vision: Option<ModelVisionLimits>,
 }
 
 /// Model policy state.
@@ -776,6 +1077,7 @@ pub struct ModelBilling {
 
 /// Information about an available model.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
@@ -784,6 +1086,145 @@ pub struct ModelInfo {
     pub policy: Option<ModelPolicy>,
     #[serde(default)]
     pub billing: Option<ModelBilling>,
+    #[serde(default)]
+    pub supported_reasoning_efforts: Option<Vec<String>>,
+    #[serde(default)]
+    pub default_reasoning_effort: Option<String>,
+}
+
+// =============================================================================
+// Selection Attachment Types
+// =============================================================================
+
+/// Position in a text document (line + character).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectionPosition {
+    #[serde(default)]
+    pub line: f64,
+    #[serde(default)]
+    pub character: f64,
+}
+
+/// Range within a text document.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SelectionRange {
+    pub start: SelectionPosition,
+    pub end: SelectionPosition,
+}
+
+/// Attachment representing a text selection in a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectionAttachment {
+    pub file_path: String,
+    pub display_name: String,
+    pub text: String,
+    pub selection: SelectionRange,
+}
+
+// =============================================================================
+// User Input Types
+// =============================================================================
+
+/// Request for user input from the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputRequest {
+    pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_freeform: Option<bool>,
+}
+
+/// Response to a user input request.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputResponse {
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was_freeform: Option<bool>,
+}
+
+/// Context for a user input invocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInputInvocation {
+    pub session_id: String,
+}
+
+// =============================================================================
+// Session Lifecycle Types
+// =============================================================================
+
+/// Session lifecycle event type constants.
+pub mod session_lifecycle_event_types {
+    pub const CREATED: &str = "session.created";
+    pub const DELETED: &str = "session.deleted";
+    pub const UPDATED: &str = "session.updated";
+    pub const FOREGROUND: &str = "session.foreground";
+    pub const BACKGROUND: &str = "session.background";
+}
+
+/// Metadata for session lifecycle events.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLifecycleEventMetadata {
+    #[serde(default)]
+    pub start_time: Option<String>,
+    #[serde(default)]
+    pub modified_time: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+/// Session lifecycle event notification.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLifecycleEvent {
+    #[serde(rename = "type")]
+    pub event_type: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub metadata: Option<SessionLifecycleEventMetadata>,
+}
+
+/// Response from session.getForeground.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetForegroundSessionResponse {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+}
+
+/// Response from session.setForeground.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetForegroundSessionResponse {
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// Stop Error
+// =============================================================================
+
+/// Error collected during client stop.
+#[derive(Debug, Clone)]
+pub struct StopError {
+    pub message: String,
+    pub source: Option<String>,
+}
+
+impl std::fmt::Display for StopError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
 }
 
 #[cfg(test)]
@@ -857,5 +1298,256 @@ mod tests {
 
         assert_eq!(tool.name, "my_tool");
         assert_eq!(tool.description, "A test tool");
+    }
+
+    #[test]
+    fn test_user_input_request_roundtrip() {
+        let req = UserInputRequest {
+            question: "What color?".into(),
+            choices: Some(vec!["red".into(), "blue".into()]),
+            allow_freeform: Some(true),
+        };
+        let j = serde_json::to_value(&req).unwrap();
+        assert_eq!(j["question"], "What color?");
+        assert_eq!(j["choices"][0], "red");
+        assert_eq!(j["allowFreeform"], true);
+
+        let req2: UserInputRequest = serde_json::from_value(j).unwrap();
+        assert_eq!(req2.question, "What color?");
+    }
+
+    #[test]
+    fn test_user_input_response_roundtrip() {
+        let resp = UserInputResponse {
+            answer: "blue".into(),
+            was_freeform: Some(true),
+        };
+        let j = serde_json::to_value(&resp).unwrap();
+        assert_eq!(j["answer"], "blue");
+
+        let resp2: UserInputResponse = serde_json::from_value(j).unwrap();
+        assert_eq!(resp2.answer, "blue");
+        assert_eq!(resp2.was_freeform, Some(true));
+    }
+
+    #[test]
+    fn test_user_input_request_minimal() {
+        let j = serde_json::json!({"question": "Yes or no?"});
+        let req: UserInputRequest = serde_json::from_value(j).unwrap();
+        assert_eq!(req.question, "Yes or no?");
+        assert!(req.choices.is_none());
+        assert!(req.allow_freeform.is_none());
+    }
+
+    #[test]
+    fn test_session_lifecycle_event_from_json() {
+        let j = serde_json::json!({
+            "type": "session.created",
+            "sessionId": "sess_123",
+            "metadata": {
+                "startTime": "2024-01-15T10:30:00Z",
+                "modifiedTime": "2024-01-15T10:30:00Z",
+                "summary": "Test session"
+            }
+        });
+        let event: SessionLifecycleEvent = serde_json::from_value(j).unwrap();
+        assert_eq!(event.event_type, session_lifecycle_event_types::CREATED);
+        assert_eq!(event.session_id, "sess_123");
+        assert_eq!(
+            event.metadata.as_ref().unwrap().summary,
+            Some("Test session".into())
+        );
+    }
+
+    #[test]
+    fn test_get_foreground_session_response() {
+        let j = serde_json::json!({"sessionId": "sess_123", "workspacePath": "/tmp"});
+        let resp: GetForegroundSessionResponse = serde_json::from_value(j).unwrap();
+        assert_eq!(resp.session_id, Some("sess_123".into()));
+        assert_eq!(resp.workspace_path, Some("/tmp".into()));
+    }
+
+    #[test]
+    fn test_set_foreground_session_response() {
+        let j = serde_json::json!({"success": true});
+        let resp: SetForegroundSessionResponse = serde_json::from_value(j).unwrap();
+        assert!(resp.success);
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_set_foreground_session_response_error() {
+        let j = serde_json::json!({"success": false, "error": "not found"});
+        let resp: SetForegroundSessionResponse = serde_json::from_value(j).unwrap();
+        assert!(!resp.success);
+        assert_eq!(resp.error, Some("not found".into()));
+    }
+
+    #[test]
+    fn test_selection_attachment_roundtrip() {
+        let att = SelectionAttachment {
+            file_path: "src/main.rs".into(),
+            display_name: "main.rs".into(),
+            text: "fn main()".into(),
+            selection: SelectionRange {
+                start: SelectionPosition {
+                    line: 1.0,
+                    character: 0.0,
+                },
+                end: SelectionPosition {
+                    line: 1.0,
+                    character: 9.0,
+                },
+            },
+        };
+        let j = serde_json::to_value(&att).unwrap();
+        assert_eq!(j["filePath"], "src/main.rs");
+        assert_eq!(j["selection"]["start"]["line"], 1.0);
+    }
+
+    #[test]
+    fn test_attachment_type_selection() {
+        let j = serde_json::json!("selection");
+        let at: AttachmentType = serde_json::from_value(j).unwrap();
+        assert_eq!(at, AttachmentType::Selection);
+    }
+
+    #[test]
+    fn test_stop_error_display() {
+        let err = StopError {
+            message: "timeout".into(),
+            source: Some("rpc".into()),
+        };
+        assert_eq!(format!("{err}"), "timeout");
+    }
+
+    #[test]
+    fn test_session_config_reasoning_effort() {
+        let config = SessionConfig {
+            reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["reasoningEffort"], "high");
+    }
+
+    #[test]
+    fn test_session_config_working_directory() {
+        let config = SessionConfig {
+            working_directory: Some("/home/user/project".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["workingDirectory"], "/home/user/project");
+    }
+
+    #[test]
+    fn test_resume_config_disable_resume() {
+        let config = ResumeSessionConfig {
+            disable_resume: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["disableResume"], true);
+    }
+
+    #[test]
+    fn test_resume_config_model() {
+        let config = ResumeSessionConfig {
+            model: Some("gpt-4".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["model"], "gpt-4");
+    }
+
+    #[test]
+    fn test_session_hooks_has_any() {
+        let hooks = SessionHooks::default();
+        assert!(!hooks.has_any());
+
+        let hooks = SessionHooks {
+            on_pre_tool_use: Some(Arc::new(|_| PreToolUseHookOutput::default())),
+            ..Default::default()
+        };
+        assert!(hooks.has_any());
+    }
+
+    #[test]
+    fn test_session_hooks_debug() {
+        let hooks = SessionHooks {
+            on_pre_tool_use: Some(Arc::new(|_| PreToolUseHookOutput::default())),
+            ..Default::default()
+        };
+        let debug = format!("{:?}", hooks);
+        assert!(debug.contains("on_pre_tool_use: true"));
+        assert!(debug.contains("on_post_tool_use: false"));
+    }
+
+    #[test]
+    fn test_pre_tool_use_hook_input_serde() {
+        let json = serde_json::json!({
+            "timestamp": 1234567890,
+            "cwd": "/tmp",
+            "toolName": "my_tool",
+            "toolArgs": {"key": "value"}
+        });
+        let input: PreToolUseHookInput = serde_json::from_value(json).unwrap();
+        assert_eq!(input.timestamp, 1234567890);
+        assert_eq!(input.tool_name, "my_tool");
+    }
+
+    #[test]
+    fn test_pre_tool_use_hook_output_serde() {
+        let output = PreToolUseHookOutput {
+            permission_decision: Some("allow".into()),
+            additional_context: Some("context".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["permissionDecision"], "allow");
+        assert_eq!(json["additionalContext"], "context");
+        assert!(json.get("suppressOutput").is_none());
+    }
+
+    #[test]
+    fn test_session_end_hook_input_serde() {
+        let json = serde_json::json!({
+            "timestamp": 1234567890,
+            "cwd": "/tmp",
+            "reason": "complete",
+            "finalMessage": "Done"
+        });
+        let input: SessionEndHookInput = serde_json::from_value(json).unwrap();
+        assert_eq!(input.reason, "complete");
+        assert_eq!(input.final_message, Some("Done".into()));
+    }
+
+    #[test]
+    fn test_error_occurred_hook_input_serde() {
+        let json = serde_json::json!({
+            "timestamp": 1234567890,
+            "cwd": "/tmp",
+            "error": "connection failed",
+            "errorContext": "model_call",
+            "recoverable": true
+        });
+        let input: ErrorOccurredHookInput = serde_json::from_value(json).unwrap();
+        assert_eq!(input.error_context, "model_call");
+        assert!(input.recoverable);
+    }
+
+    #[test]
+    fn test_hooks_not_serialized_in_config() {
+        let config = SessionConfig {
+            hooks: Some(SessionHooks {
+                on_pre_tool_use: Some(Arc::new(|_| PreToolUseHookOutput::default())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        // hooks field should be skipped from serialization
+        assert!(json.get("hooks").is_none());
     }
 }

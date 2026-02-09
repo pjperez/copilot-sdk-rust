@@ -30,7 +30,7 @@
 //!         }
 //!     }
 //!
-//!     client.stop().await?;
+//!     client.stop().await;
 //!     Ok(())
 //! }
 //! ```
@@ -54,8 +54,13 @@ pub use types::{
     ClientOptions,
     ConnectionState,
     CustomAgentConfig,
+    // Hook types
+    ErrorOccurredHandler,
+    ErrorOccurredHookInput,
+    ErrorOccurredHookOutput,
     // Response types
     GetAuthStatusResponse,
+    GetForegroundSessionResponse,
     GetStatusResponse,
     InfiniteSessionConfig,
     LogLevel,
@@ -69,16 +74,39 @@ pub use types::{
     ModelLimits,
     ModelPolicy,
     ModelSupports,
+    ModelVisionLimits,
     // Permission types
     PermissionRequest,
     PermissionRequestResult,
     PingResponse,
+    PostToolUseHandler,
+    PostToolUseHookInput,
+    PostToolUseHookOutput,
+    PreToolUseHandler,
+    PreToolUseHookInput,
+    PreToolUseHookOutput,
     ProviderConfig,
     ResumeSessionConfig,
     // Constants
     SDK_PROTOCOL_VERSION,
+    // Selection types
+    SelectionAttachment,
+    SelectionPosition,
+    SelectionRange,
     SessionConfig,
+    SessionEndHandler,
+    SessionEndHookInput,
+    SessionEndHookOutput,
+    SessionHooks,
+    // Session lifecycle types
+    SessionLifecycleEvent,
+    SessionLifecycleEventMetadata,
     SessionMetadata,
+    SessionStartHandler,
+    SessionStartHookInput,
+    SessionStartHookOutput,
+    SetForegroundSessionResponse,
+    StopError,
     SystemMessageConfig,
     SystemMessageMode,
     // Tool types
@@ -87,7 +115,16 @@ pub use types::{
     ToolInvocation,
     ToolResult,
     ToolResultObject,
+    // User input types
+    UserInputInvocation,
+    UserInputRequest,
+    UserInputResponse,
     UserMessageAttachment,
+    UserPromptSubmittedHandler,
+    UserPromptSubmittedHookInput,
+    UserPromptSubmittedHookOutput,
+    // Session lifecycle event type constants
+    session_lifecycle_event_types,
 };
 
 // Re-export event types
@@ -102,6 +139,7 @@ pub use events::{
     AssistantTurnEndData,
     AssistantTurnStartData,
     AssistantUsageData,
+    CompactionTokensUsed,
     CustomAgentCompletedData,
     CustomAgentFailedData,
     CustomAgentSelectedData,
@@ -114,6 +152,8 @@ pub use events::{
     // Main event types
     RawSessionEvent,
     RepositoryInfo,
+    SessionCompactionCompleteData,
+    SessionCompactionStartData,
     SessionErrorData,
     SessionEvent,
     SessionEventData,
@@ -122,14 +162,21 @@ pub use events::{
     SessionInfoData,
     SessionModelChangeData,
     SessionResumeData,
+    SessionShutdownData,
+    SessionSnapshotRewindData,
     SessionStartData,
     SessionTruncationData,
+    SessionUsageInfoData,
+    ShutdownCodeChanges,
+    ShutdownType,
+    SkillInvokedData,
     SystemMessageEventData,
     SystemMessageMetadata,
     SystemMessageRole,
     ToolExecutionCompleteData,
     ToolExecutionError,
     ToolExecutionPartialResultData,
+    ToolExecutionProgressData,
     ToolExecutionStartData,
     ToolRequestItem,
     ToolResultContent,
@@ -155,8 +202,8 @@ pub use process::{
 // Re-export session types
 pub use session::{
     EventHandler, EventSubscription, InvokeFuture, PermissionHandler, RegisteredTool, Session,
-    ToolHandler,
+    ToolHandler, UserInputHandler,
 };
 
 // Re-export client types
-pub use client::{Client, ClientBuilder};
+pub use client::{Client, ClientBuilder, LifecycleHandler};

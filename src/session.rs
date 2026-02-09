@@ -8,12 +8,16 @@
 use crate::error::{CopilotError, Result};
 use crate::events::{SessionEvent, SessionEventData};
 use crate::types::{
-    MessageOptions, PermissionRequest, PermissionRequestResult, Tool, ToolResultObject,
+    ErrorOccurredHookInput, MessageOptions, PermissionRequest, PermissionRequestResult,
+    PostToolUseHookInput, PreToolUseHookInput, SessionEndHookInput, SessionHooks,
+    SessionStartHookInput, Tool, ToolResultObject, UserInputInvocation, UserInputRequest,
+    UserInputResponse, UserPromptSubmittedHookInput,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
 
 // =============================================================================
@@ -29,6 +33,10 @@ pub type PermissionHandler =
 
 /// Handler for tool invocations.
 pub type ToolHandler = Arc<dyn Fn(&str, &Value) -> ToolResultObject + Send + Sync>;
+
+/// Handler for user input requests.
+pub type UserInputHandler =
+    Arc<dyn Fn(&UserInputRequest, &UserInputInvocation) -> UserInputResponse + Send + Sync>;
 
 /// Type alias for the invoke future.
 pub type InvokeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>;
@@ -76,6 +84,10 @@ struct SessionState {
     tools: HashMap<String, RegisteredTool>,
     /// Permission handler.
     permission_handler: Option<PermissionHandler>,
+    /// User input handler.
+    user_input_handler: Option<UserInputHandler>,
+    /// Session hooks.
+    hooks: Option<SessionHooks>,
     /// Callback-based event handlers.
     event_handlers: HashMap<u64, EventHandler>,
     /// Next handler ID.
@@ -111,7 +123,7 @@ struct SessionState {
 ///         _ => {}
 ///     }
 /// }
-/// client.stop().await?;
+/// client.stop().await;
 /// # Ok(())
 /// # }
 /// ```
@@ -145,6 +157,8 @@ impl Session {
             state: Arc::new(RwLock::new(SessionState {
                 tools: HashMap::new(),
                 permission_handler: None,
+                user_input_handler: None,
+                hooks: None,
                 event_handlers: HashMap::new(),
                 next_handler_id: AtomicU64::new(1),
             })),
@@ -184,15 +198,22 @@ impl Session {
 
     /// Register a callback-based event handler.
     ///
-    /// Returns a handler ID that can be used to unsubscribe.
-    pub async fn on<F>(&self, handler: F) -> u64
+    /// Returns an unsubscribe closure. Call it to remove the handler.
+    /// Alternatively, use [`off`] with the internal handler ID.
+    pub async fn on<F>(&self, handler: F) -> impl FnOnce()
     where
         F: Fn(&SessionEvent) + Send + Sync + 'static,
     {
         let mut state = self.state.write().await;
         let id = state.next_handler_id.fetch_add(1, Ordering::SeqCst);
         state.event_handlers.insert(id, Arc::new(handler));
-        id
+
+        let state_ref = Arc::clone(&self.state);
+        move || {
+            tokio::spawn(async move {
+                state_ref.write().await.event_handlers.remove(&id);
+            });
+        }
     }
 
     /// Unsubscribe a callback-based event handler.
@@ -370,6 +391,150 @@ impl Session {
     }
 
     // =========================================================================
+    // User Input Handling
+    // =========================================================================
+
+    /// Register a handler for user input requests from the server.
+    pub async fn register_user_input_handler<F>(&self, handler: F)
+    where
+        F: Fn(&UserInputRequest, &UserInputInvocation) -> UserInputResponse + Send + Sync + 'static,
+    {
+        let mut state = self.state.write().await;
+        state.user_input_handler = Some(Arc::new(handler));
+    }
+
+    /// Handle a user input request from the server.
+    pub async fn handle_user_input_request(
+        &self,
+        request: &UserInputRequest,
+    ) -> Result<UserInputResponse> {
+        let state = self.state.read().await;
+        if let Some(handler) = &state.user_input_handler {
+            let invocation = UserInputInvocation {
+                session_id: self.session_id.clone(),
+            };
+            Ok(handler(request, &invocation))
+        } else {
+            Err(CopilotError::Protocol(
+                "No user input handler registered".into(),
+            ))
+        }
+    }
+
+    /// Check if a user input handler is registered.
+    pub async fn has_user_input_handler(&self) -> bool {
+        let state = self.state.read().await;
+        state.user_input_handler.is_some()
+    }
+
+    // =========================================================================
+    // Hooks
+    // =========================================================================
+
+    /// Register session hooks.
+    pub async fn register_hooks(&self, hooks: SessionHooks) {
+        let mut state = self.state.write().await;
+        state.hooks = Some(hooks);
+    }
+
+    /// Check if any hooks are registered.
+    pub async fn has_hooks(&self) -> bool {
+        let state = self.state.read().await;
+        state.hooks.as_ref().is_some_and(|h| h.has_any())
+    }
+
+    /// Handle a `hooks.invoke` callback from the server.
+    ///
+    /// Dispatches to the appropriate hook handler based on `hook_type` and returns
+    /// the serialized output JSON.
+    pub async fn handle_hooks_invoke(&self, hook_type: &str, input: &Value) -> Result<Value> {
+        let state = self.state.read().await;
+        let hooks = match &state.hooks {
+            Some(h) => h,
+            None => return Ok(Value::Null),
+        };
+
+        match hook_type {
+            "preToolUse" => {
+                if let Some(handler) = &hooks.on_pre_tool_use {
+                    let hook_input: PreToolUseHookInput = serde_json::from_value(input.clone())
+                        .map_err(|e| {
+                            CopilotError::Protocol(format!("Invalid preToolUse input: {}", e))
+                        })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "postToolUse" => {
+                if let Some(handler) = &hooks.on_post_tool_use {
+                    let hook_input: PostToolUseHookInput = serde_json::from_value(input.clone())
+                        .map_err(|e| {
+                            CopilotError::Protocol(format!("Invalid postToolUse input: {}", e))
+                        })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "userPromptSubmitted" => {
+                if let Some(handler) = &hooks.on_user_prompt_submitted {
+                    let hook_input: UserPromptSubmittedHookInput =
+                        serde_json::from_value(input.clone()).map_err(|e| {
+                            CopilotError::Protocol(format!(
+                                "Invalid userPromptSubmitted input: {}",
+                                e
+                            ))
+                        })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "sessionStart" => {
+                if let Some(handler) = &hooks.on_session_start {
+                    let hook_input: SessionStartHookInput = serde_json::from_value(input.clone())
+                        .map_err(|e| {
+                        CopilotError::Protocol(format!("Invalid sessionStart input: {}", e))
+                    })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "sessionEnd" => {
+                if let Some(handler) = &hooks.on_session_end {
+                    let hook_input: SessionEndHookInput = serde_json::from_value(input.clone())
+                        .map_err(|e| {
+                            CopilotError::Protocol(format!("Invalid sessionEnd input: {}", e))
+                        })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            "errorOccurred" => {
+                if let Some(handler) = &hooks.on_error_occurred {
+                    let hook_input: ErrorOccurredHookInput = serde_json::from_value(input.clone())
+                        .map_err(|e| {
+                            CopilotError::Protocol(format!("Invalid errorOccurred input: {}", e))
+                        })?;
+                    let output = handler(hook_input);
+                    Ok(serde_json::to_value(output).unwrap_or(Value::Null))
+                } else {
+                    Ok(Value::Null)
+                }
+            }
+            _ => Ok(Value::Null),
+        }
+    }
+
+    // =========================================================================
     // Lifecycle
     // =========================================================================
 
@@ -389,49 +554,123 @@ impl Session {
 // =============================================================================
 
 impl Session {
+    /// Default timeout for waiting on session events (60 seconds).
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
     /// Wait for the session to become idle.
     ///
-    /// Collects all assistant messages and returns them when idle.
-    pub async fn wait_for_idle(&self) -> Result<String> {
+    /// Returns the last assistant message event, or None if no message was received.
+    /// Uses the specified timeout, or 60 seconds if None.
+    pub async fn wait_for_idle(&self, timeout: Option<Duration>) -> Result<Option<SessionEvent>> {
+        let timeout = timeout.unwrap_or(Self::DEFAULT_TIMEOUT);
         let mut subscription = self.subscribe();
-        let mut content = String::new();
+        let mut last_assistant_message: Option<SessionEvent> = None;
 
-        loop {
-            match subscription.recv().await {
-                Ok(event) => match &event.data {
-                    SessionEventData::AssistantMessage(msg) => {
-                        content.push_str(&msg.content);
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                match subscription.recv().await {
+                    Ok(event) => match &event.data {
+                        SessionEventData::AssistantMessage(_) => {
+                            last_assistant_message = Some(event);
+                        }
+                        SessionEventData::AssistantMessageDelta(_) => {
+                            // Deltas are intermediate; we track the full message
+                        }
+                        SessionEventData::SessionIdle(_) => {
+                            break;
+                        }
+                        SessionEventData::SessionError(err) => {
+                            return Err(CopilotError::Protocol(format!(
+                                "Session error: {}",
+                                err.message
+                            )));
+                        }
+                        _ => {}
+                    },
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(CopilotError::ConnectionClosed);
                     }
-                    SessionEventData::AssistantMessageDelta(delta) => {
-                        content.push_str(&delta.delta_content);
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Continue - we missed some events but can recover
                     }
-                    SessionEventData::SessionIdle(_) => {
-                        break;
-                    }
-                    SessionEventData::SessionError(err) => {
-                        return Err(CopilotError::Protocol(format!(
-                            "Session error: {}",
-                            err.message
-                        )));
-                    }
-                    _ => {}
-                },
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(CopilotError::ConnectionClosed);
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Continue - we missed some events but can recover
                 }
             }
-        }
+            Ok(())
+        })
+        .await;
 
-        Ok(content)
+        match result {
+            Ok(Ok(())) => Ok(last_assistant_message),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(CopilotError::Timeout(timeout)),
+        }
     }
 
     /// Send a message and wait for the complete response.
-    pub async fn send_and_wait(&self, options: impl Into<MessageOptions>) -> Result<String> {
+    ///
+    /// Returns the last `AssistantMessage` event, or `None` if session
+    /// became idle without producing an assistant message.
+    /// Uses the specified timeout, or 60 seconds if None.
+    pub async fn send_and_wait(
+        &self,
+        options: impl Into<MessageOptions>,
+        timeout: Option<Duration>,
+    ) -> Result<Option<SessionEvent>> {
         self.send(options).await?;
-        self.wait_for_idle().await
+        self.wait_for_idle(timeout).await
+    }
+
+    /// Send a message and wait for the response content as a string.
+    ///
+    /// Convenience method that collects all assistant message/delta content.
+    /// Uses the specified timeout, or 60 seconds if None.
+    pub async fn send_and_collect(
+        &self,
+        options: impl Into<MessageOptions>,
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        let timeout = timeout.unwrap_or(Self::DEFAULT_TIMEOUT);
+        self.send(options).await?;
+
+        let mut subscription = self.subscribe();
+        let mut content = String::new();
+
+        let result = tokio::time::timeout(timeout, async {
+            loop {
+                match subscription.recv().await {
+                    Ok(event) => match &event.data {
+                        SessionEventData::AssistantMessage(msg) => {
+                            content.push_str(&msg.content);
+                        }
+                        SessionEventData::AssistantMessageDelta(delta) => {
+                            content.push_str(&delta.delta_content);
+                        }
+                        SessionEventData::SessionIdle(_) => {
+                            break;
+                        }
+                        SessionEventData::SessionError(err) => {
+                            return Err(CopilotError::Protocol(format!(
+                                "Session error: {}",
+                                err.message
+                            )));
+                        }
+                        _ => {}
+                    },
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(CopilotError::ConnectionClosed);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                }
+            }
+            Ok(())
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => Ok(content),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(CopilotError::Timeout(timeout)),
+        }
     }
 }
 
@@ -553,7 +792,7 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
 
         let count_clone = Arc::clone(&call_count);
-        let handler_id = session
+        let unsubscribe = session
             .on(move |_event| {
                 count_clone.fetch_add(1, Ordering::SeqCst);
             })
@@ -573,7 +812,7 @@ mod tests {
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
 
         // Unsubscribe
-        session.off(handler_id).await;
+        unsubscribe();
     }
 
     #[tokio::test]
@@ -607,5 +846,151 @@ mod tests {
             messages[0].data,
             crate::events::SessionEventData::SessionIdle(_)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_user_input_handler() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        session
+            .register_user_input_handler(|req, _inv| {
+                assert_eq!(req.question, "What color?");
+                UserInputResponse {
+                    answer: "blue".into(),
+                    was_freeform: Some(true),
+                }
+            })
+            .await;
+
+        let request = UserInputRequest {
+            question: "What color?".into(),
+            choices: Some(vec!["red".into(), "blue".into()]),
+            allow_freeform: Some(true),
+        };
+
+        let response = session.handle_user_input_request(&request).await.unwrap();
+        assert_eq!(response.answer, "blue");
+        assert_eq!(response.was_freeform, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_user_input_no_handler_errors() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        let request = UserInputRequest {
+            question: "?".into(),
+            choices: None,
+            allow_freeform: None,
+        };
+
+        let result = session.handle_user_input_request(&request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_register_hooks() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        assert!(!session.has_hooks().await);
+
+        let hooks = crate::types::SessionHooks {
+            on_pre_tool_use: Some(Arc::new(|input| {
+                assert_eq!(input.tool_name, "my_tool");
+                crate::types::PreToolUseHookOutput {
+                    permission_decision: Some("allow".into()),
+                    ..Default::default()
+                }
+            })),
+            ..Default::default()
+        };
+
+        session.register_hooks(hooks).await;
+        assert!(session.has_hooks().await);
+    }
+
+    #[tokio::test]
+    async fn test_hooks_invoke_pre_tool_use() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        let hooks = crate::types::SessionHooks {
+            on_pre_tool_use: Some(Arc::new(|_input| crate::types::PreToolUseHookOutput {
+                permission_decision: Some("allow".into()),
+                additional_context: Some("extra context".into()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        session.register_hooks(hooks).await;
+
+        let input = serde_json::json!({
+            "timestamp": 1234567890,
+            "cwd": "/tmp",
+            "toolName": "test_tool",
+            "toolArgs": {"key": "value"}
+        });
+
+        let result = session
+            .handle_hooks_invoke("preToolUse", &input)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.get("permissionDecision").and_then(|v| v.as_str()),
+            Some("allow")
+        );
+        assert_eq!(
+            result.get("additionalContext").and_then(|v| v.as_str()),
+            Some("extra context")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_hooks_invoke_no_handler_returns_null() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        // No hooks registered at all
+        let result = session
+            .handle_hooks_invoke("preToolUse", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.is_null());
+
+        // Hooks registered but not for this type
+        let hooks = crate::types::SessionHooks {
+            on_session_start: Some(Arc::new(|_input| {
+                crate::types::SessionStartHookOutput::default()
+            })),
+            ..Default::default()
+        };
+        session.register_hooks(hooks).await;
+
+        let input = serde_json::json!({
+            "timestamp": 1234567890,
+            "cwd": "/tmp",
+            "toolName": "test_tool",
+            "toolArgs": {}
+        });
+        let result = session
+            .handle_hooks_invoke("preToolUse", &input)
+            .await
+            .unwrap();
+        assert!(result.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_hooks_invoke_unknown_type_returns_null() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+
+        let hooks = crate::types::SessionHooks {
+            on_pre_tool_use: Some(Arc::new(|_| crate::types::PreToolUseHookOutput::default())),
+            ..Default::default()
+        };
+        session.register_hooks(hooks).await;
+
+        let result = session
+            .handle_hooks_invoke("unknownHookType", &serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.is_null());
     }
 }

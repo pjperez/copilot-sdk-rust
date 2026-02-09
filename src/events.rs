@@ -96,13 +96,18 @@ pub struct SystemMessageMetadata {
 // =============================================================================
 
 /// Data for session.start event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionStartData {
+    #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
     pub version: f64,
+    #[serde(default)]
     pub producer: String,
+    #[serde(default)]
     pub copilot_version: String,
+    #[serde(default)]
     pub start_time: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_model: Option<String>,
@@ -124,6 +129,10 @@ pub struct SessionErrorData {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stack: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_call_id: Option<String>,
 }
 
 /// Data for session.idle event.
@@ -340,6 +349,10 @@ pub struct ToolExecutionCompleteData {
     pub tool_telemetry: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_tool_name: Option<String>,
 }
 
 /// Data for custom_agent.started event.
@@ -413,6 +426,132 @@ pub struct SystemMessageEventData {
     pub metadata: Option<SystemMessageMetadata>,
 }
 
+/// Data for session.compaction_start event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionCompactionStartData {}
+
+/// Tokens used during compaction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactionTokensUsed {
+    #[serde(default)]
+    pub input: f64,
+    #[serde(default)]
+    pub output: f64,
+    #[serde(default)]
+    pub cached_input: f64,
+}
+
+/// Data for session.compaction_complete event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCompactionCompleteData {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_compaction_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_compaction_tokens: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pre_compaction_messages_length: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_compaction_messages_length: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compaction_tokens_used: Option<CompactionTokensUsed>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages_removed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_removed: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_number: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_path: Option<String>,
+}
+
+/// Shutdown type for session.shutdown event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShutdownType {
+    Routine,
+    Error,
+}
+
+/// Code changes reported in shutdown event.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownCodeChanges {
+    #[serde(default)]
+    pub lines_added: f64,
+    #[serde(default)]
+    pub lines_removed: f64,
+    #[serde(default)]
+    pub files_modified: Vec<String>,
+}
+
+/// Data for session.shutdown event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionShutdownData {
+    pub shutdown_type: ShutdownType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_reason: Option<String>,
+    #[serde(default)]
+    pub total_premium_requests: f64,
+    #[serde(default)]
+    pub total_api_duration_ms: f64,
+    #[serde(default)]
+    pub session_start_time: f64,
+    #[serde(default)]
+    pub code_changes: ShutdownCodeChanges,
+    #[serde(default)]
+    pub model_metrics: HashMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+}
+
+/// Data for session.snapshot_rewind event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSnapshotRewindData {
+    pub up_to_event_id: String,
+    #[serde(default)]
+    pub events_removed: f64,
+}
+
+/// Data for session.usage_info event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageInfoData {
+    #[serde(default)]
+    pub token_limit: f64,
+    #[serde(default)]
+    pub current_tokens: f64,
+    #[serde(default)]
+    pub messages_length: f64,
+}
+
+/// Data for tool.execution_progress event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolExecutionProgressData {
+    pub tool_call_id: String,
+    pub progress_message: String,
+}
+
+/// Data for skill.invoked event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillInvokedData {
+    pub name: String,
+    pub path: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
+}
+
 // =============================================================================
 // Session Event (Discriminated Union)
 // =============================================================================
@@ -444,6 +583,7 @@ pub enum SessionEventData {
     ToolExecutionStart(ToolExecutionStartData),
     ToolExecutionPartialResult(ToolExecutionPartialResultData),
     ToolExecutionComplete(ToolExecutionCompleteData),
+    ToolExecutionProgress(ToolExecutionProgressData),
     CustomAgentStarted(CustomAgentStartedData),
     CustomAgentCompleted(CustomAgentCompletedData),
     CustomAgentFailed(CustomAgentFailedData),
@@ -451,6 +591,12 @@ pub enum SessionEventData {
     HookStart(HookStartData),
     HookEnd(HookEndData),
     SystemMessage(SystemMessageEventData),
+    SessionCompactionStart(SessionCompactionStartData),
+    SessionCompactionComplete(SessionCompactionCompleteData),
+    SessionShutdown(SessionShutdownData),
+    SessionSnapshotRewind(SessionSnapshotRewindData),
+    SessionUsageInfo(SessionUsageInfoData),
+    SkillInvoked(SkillInvokedData),
     /// Unknown event - preserves raw JSON for forward compatibility.
     Unknown(serde_json::Value),
 }
@@ -658,16 +804,20 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
         "tool.execution_complete" => serde_json::from_value(data)
             .map(SessionEventData::ToolExecutionComplete)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "custom_agent.started" => serde_json::from_value(data)
+        "tool.execution_progress" => serde_json::from_value(data)
+            .map(SessionEventData::ToolExecutionProgress)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        // Primary wire names (subagent.*) + legacy aliases (custom_agent.*)
+        "subagent.started" | "custom_agent.started" => serde_json::from_value(data)
             .map(SessionEventData::CustomAgentStarted)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "custom_agent.completed" => serde_json::from_value(data)
+        "subagent.completed" | "custom_agent.completed" => serde_json::from_value(data)
             .map(SessionEventData::CustomAgentCompleted)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "custom_agent.failed" => serde_json::from_value(data)
+        "subagent.failed" | "custom_agent.failed" => serde_json::from_value(data)
             .map(SessionEventData::CustomAgentFailed)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "custom_agent.selected" => serde_json::from_value(data)
+        "subagent.selected" | "custom_agent.selected" => serde_json::from_value(data)
             .map(SessionEventData::CustomAgentSelected)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "hook.start" => serde_json::from_value(data)
@@ -678,6 +828,24 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "system.message" => serde_json::from_value(data)
             .map(SessionEventData::SystemMessage)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "session.compaction_start" => {
+            SessionEventData::SessionCompactionStart(SessionCompactionStartData {})
+        }
+        "session.compaction_complete" => serde_json::from_value(data)
+            .map(SessionEventData::SessionCompactionComplete)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "session.shutdown" => serde_json::from_value(data)
+            .map(SessionEventData::SessionShutdown)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "session.snapshot_rewind" => serde_json::from_value(data)
+            .map(SessionEventData::SessionSnapshotRewind)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "session.usage_info" => serde_json::from_value(data)
+            .map(SessionEventData::SessionUsageInfo)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "skill.invoked" => serde_json::from_value(data)
+            .map(SessionEventData::SkillInvoked)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         // Unknown event type - preserve raw data
         _ => SessionEventData::Unknown(data),
@@ -842,5 +1010,288 @@ mod tests {
         let event = SessionEvent::from_json(&json).unwrap();
         assert_eq!(event.parent_id, Some("evt_128".to_string()));
         assert_eq!(event.ephemeral, Some(true));
+    }
+
+    #[test]
+    fn test_parse_subagent_started() {
+        let json = json!({
+            "id": "evt_200",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "subagent.started",
+            "data": {
+                "toolCallId": "call_1",
+                "agentName": "test-agent",
+                "agentDisplayName": "Test Agent",
+                "agentDescription": "A test agent"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert!(matches!(
+            event.data,
+            SessionEventData::CustomAgentStarted(_)
+        ));
+        if let SessionEventData::CustomAgentStarted(data) = &event.data {
+            assert_eq!(data.agent_name, "test-agent");
+        }
+    }
+
+    #[test]
+    fn test_parse_subagent_completed_legacy_alias() {
+        // Verify legacy custom_agent.* wire names still work
+        let json = json!({
+            "id": "evt_201",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "custom_agent.completed",
+            "data": {
+                "toolCallId": "call_1",
+                "agentName": "test-agent"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert!(matches!(
+            event.data,
+            SessionEventData::CustomAgentCompleted(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_subagent_all_wire_names() {
+        for wire_name in &["subagent.failed", "custom_agent.failed"] {
+            let json = json!({
+                "id": "evt_202",
+                "timestamp": "2024-01-15T10:30:00Z",
+                "type": wire_name,
+                "data": {
+                    "toolCallId": "call_1",
+                    "agentName": "agent",
+                    "error": "boom"
+                }
+            });
+            let event = SessionEvent::from_json(&json).unwrap();
+            assert!(
+                matches!(event.data, SessionEventData::CustomAgentFailed(_)),
+                "Failed to parse {wire_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_session_compaction_start() {
+        let json = json!({
+            "id": "evt_300",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.compaction_start",
+            "data": {}
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert!(matches!(
+            event.data,
+            SessionEventData::SessionCompactionStart(_)
+        ));
+    }
+
+    #[test]
+    fn test_parse_session_compaction_complete() {
+        let json = json!({
+            "id": "evt_301",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.compaction_complete",
+            "data": {
+                "success": true,
+                "preCompactionTokens": 50000.0,
+                "postCompactionTokens": 10000.0,
+                "compactionTokensUsed": {
+                    "input": 100.0,
+                    "output": 200.0,
+                    "cachedInput": 50.0
+                },
+                "summaryContent": "Session was compacted"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionCompactionComplete(data) = &event.data {
+            assert!(data.success);
+            assert_eq!(data.pre_compaction_tokens, Some(50000.0));
+            assert_eq!(data.compaction_tokens_used.as_ref().unwrap().input, 100.0);
+        } else {
+            panic!("Expected SessionCompactionComplete");
+        }
+    }
+
+    #[test]
+    fn test_parse_session_shutdown() {
+        let json = json!({
+            "id": "evt_302",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.shutdown",
+            "data": {
+                "shutdownType": "routine",
+                "totalPremiumRequests": 5.0,
+                "totalApiDurationMs": 1200.0,
+                "sessionStartTime": 1700000000.0,
+                "codeChanges": {
+                    "linesAdded": 10.0,
+                    "linesRemoved": 3.0,
+                    "filesModified": ["src/main.rs"]
+                },
+                "modelMetrics": {},
+                "currentModel": "gpt-4"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionShutdown(data) = &event.data {
+            assert_eq!(data.shutdown_type, ShutdownType::Routine);
+            assert_eq!(data.current_model, Some("gpt-4".to_string()));
+            assert_eq!(data.code_changes.lines_added, 10.0);
+        } else {
+            panic!("Expected SessionShutdown");
+        }
+    }
+
+    #[test]
+    fn test_parse_session_snapshot_rewind() {
+        let json = json!({
+            "id": "evt_303",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.snapshot_rewind",
+            "data": {
+                "upToEventId": "evt_100",
+                "eventsRemoved": 5.0
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionSnapshotRewind(data) = &event.data {
+            assert_eq!(data.up_to_event_id, "evt_100");
+            assert_eq!(data.events_removed, 5.0);
+        } else {
+            panic!("Expected SessionSnapshotRewind");
+        }
+    }
+
+    #[test]
+    fn test_parse_session_usage_info() {
+        let json = json!({
+            "id": "evt_304",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.usage_info",
+            "data": {
+                "tokenLimit": 100000.0,
+                "currentTokens": 50000.0,
+                "messagesLength": 42.0
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionUsageInfo(data) = &event.data {
+            assert_eq!(data.token_limit, 100000.0);
+            assert_eq!(data.current_tokens, 50000.0);
+        } else {
+            panic!("Expected SessionUsageInfo");
+        }
+    }
+
+    #[test]
+    fn test_parse_tool_execution_progress() {
+        let json = json!({
+            "id": "evt_305",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "tool.execution_progress",
+            "data": {
+                "toolCallId": "call_100",
+                "progressMessage": "Processing file 3 of 10..."
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::ToolExecutionProgress(data) = &event.data {
+            assert_eq!(data.tool_call_id, "call_100");
+            assert_eq!(data.progress_message, "Processing file 3 of 10...");
+        } else {
+            panic!("Expected ToolExecutionProgress");
+        }
+    }
+
+    #[test]
+    fn test_parse_skill_invoked() {
+        let json = json!({
+            "id": "evt_306",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "skill.invoked",
+            "data": {
+                "name": "code-review",
+                "path": "/skills/code-review",
+                "content": "Review this code",
+                "allowedTools": ["read_file", "search"]
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SkillInvoked(data) = &event.data {
+            assert_eq!(data.name, "code-review");
+            assert_eq!(data.allowed_tools.as_ref().unwrap().len(), 2);
+        } else {
+            panic!("Expected SkillInvoked");
+        }
+    }
+
+    #[test]
+    fn test_session_error_with_code_and_provider_call_id() {
+        let json = json!({
+            "id": "evt_err",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.error",
+            "data": {
+                "errorType": "provider_error",
+                "message": "Rate limited",
+                "code": 429.0,
+                "providerCallId": "call-abc-123"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionError(data) = &event.data {
+            assert_eq!(data.error_type, "provider_error");
+            assert_eq!(data.code, Some(429.0));
+            assert_eq!(data.provider_call_id.as_deref(), Some("call-abc-123"));
+        } else {
+            panic!("Expected SessionError");
+        }
+    }
+
+    #[test]
+    fn test_tool_execution_complete_with_mcp_fields() {
+        let json = json!({
+            "id": "evt_mcp",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "tool.execution_complete",
+            "data": {
+                "toolCallId": "call-1",
+                "success": true,
+                "mcpServerName": "my-server",
+                "mcpToolName": "read_file"
+            }
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::ToolExecutionComplete(data) = &event.data {
+            assert_eq!(data.mcp_server_name.as_deref(), Some("my-server"));
+            assert_eq!(data.mcp_tool_name.as_deref(), Some("read_file"));
+        } else {
+            panic!("Expected ToolExecutionComplete");
+        }
+    }
+
+    #[test]
+    fn test_session_start_data_optional_fields() {
+        // All fields missing should still parse with defaults
+        let json = json!({
+            "id": "evt_start",
+            "timestamp": "2024-01-15T10:30:00Z",
+            "type": "session.start",
+            "data": {}
+        });
+        let event = SessionEvent::from_json(&json).unwrap();
+        if let SessionEventData::SessionStart(data) = &event.data {
+            assert_eq!(data.session_id, "");
+            assert_eq!(data.version, 0.0);
+            assert_eq!(data.producer, "");
+        } else {
+            panic!("Expected SessionStart");
+        }
     }
 }

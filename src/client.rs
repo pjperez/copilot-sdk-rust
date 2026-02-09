@@ -11,14 +11,16 @@ use crate::jsonrpc::{StdioJsonRpcClient, TcpJsonRpcClient};
 use crate::process::{CopilotProcess, ProcessOptions};
 use crate::session::Session;
 use crate::types::{
-    ClientOptions, ConnectionState, GetAuthStatusResponse, GetStatusResponse, LogLevel, ModelInfo,
-    PingResponse, ProviderConfig, ResumeSessionConfig, SDK_PROTOCOL_VERSION, SessionConfig,
-    SessionMetadata,
+    ClientOptions, ConnectionState, GetAuthStatusResponse, GetForegroundSessionResponse,
+    GetStatusResponse, LogLevel, ModelInfo, PingResponse, ProviderConfig, ResumeSessionConfig,
+    SDK_PROTOCOL_VERSION, SessionConfig, SessionLifecycleEvent, SessionMetadata,
+    SetForegroundSessionResponse, StopError,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock};
@@ -126,6 +128,9 @@ fn spawn_cli_stderr_logger(stderr: tokio::process::ChildStderr) {
         }
     });
 }
+
+/// Handler for client-level lifecycle events (session created, deleted, etc.).
+pub type LifecycleHandler = Arc<dyn Fn(&SessionLifecycleEvent) + Send + Sync>;
 
 /// Handle a tool.call request from the server.
 async fn handle_tool_call(
@@ -267,6 +272,78 @@ async fn handle_permission_request(
     }
 
     Ok(response)
+}
+
+/// Handle a userInput.request from the server.
+async fn handle_user_input_request(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for user input request: {session_id}"
+            )));
+        }
+    };
+
+    use crate::types::UserInputRequest;
+    let request = UserInputRequest {
+        question: params
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        choices: params.get("choices").and_then(|v| {
+            v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+        }),
+        allow_freeform: params.get("allowFreeform").and_then(|v| v.as_bool()),
+    };
+
+    let response = session.handle_user_input_request(&request).await?;
+    Ok(serde_json::to_value(response).unwrap_or(json!({})))
+}
+
+async fn handle_hooks_invoke(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for hooks invoke: {session_id}"
+            )));
+        }
+    };
+
+    let hook_type = params
+        .get("hookType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let input = params.get("input").cloned().unwrap_or(Value::Null);
+
+    session.handle_hooks_invoke(hook_type, &input).await
 }
 
 fn parse_cli_url(url: &str) -> Result<(String, u16)> {
@@ -424,12 +501,12 @@ impl RpcClient {
 ///     // Create a session
 ///     let session = client.create_session(SessionConfig::default()).await?;
 ///
-///     // Send a message
-///     let response = session.send_and_wait("Hello!").await?;
+///     // Send a message and collect response
+///     let response = session.send_and_collect("Hello!", None).await?;
 ///     println!("{}", response);
 ///
 ///     // Stop the client
-///     client.stop().await?;
+///     client.stop().await;
 ///     Ok(())
 /// }
 /// ```
@@ -440,6 +517,9 @@ pub struct Client {
     process: Mutex<Option<CopilotProcess>>,
     rpc: Arc<Mutex<Option<RpcClient>>>,
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
+    lifecycle_handlers: Arc<RwLock<HashMap<u64, LifecycleHandler>>>,
+    next_lifecycle_handler_id: AtomicU64,
+    models_cache: Arc<Mutex<Option<Vec<ModelInfo>>>>,
 }
 
 impl Client {
@@ -469,6 +549,17 @@ impl Client {
                 "port is only valid when use_stdio=false".into(),
             ));
         }
+        if options.cli_url.is_some() && options.github_token.is_some() {
+            return Err(CopilotError::InvalidConfig(
+                "github_token cannot be used with cli_url (external server doesn't accept token)"
+                    .into(),
+            ));
+        }
+        if options.cli_url.is_some() && options.use_logged_in_user.is_some() {
+            return Err(CopilotError::InvalidConfig(
+                "use_logged_in_user cannot be used with cli_url (external server doesn't accept this option)".into(),
+            ));
+        }
 
         Ok(Self {
             options,
@@ -477,6 +568,9 @@ impl Client {
             process: Mutex::new(None),
             rpc: Arc::new(Mutex::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            lifecycle_handlers: Arc::new(RwLock::new(HashMap::new())),
+            next_lifecycle_handler_id: AtomicU64::new(1),
+            models_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -526,21 +620,27 @@ impl Client {
     }
 
     /// Stop the client gracefully.
-    pub async fn stop(&self) -> Result<()> {
+    pub async fn stop(&self) -> Vec<StopError> {
         let _guard = self.lifecycle.lock().await;
+        let mut errors = Vec::new();
 
         let state = *self.state.read().await;
         if state == ConnectionState::Disconnected {
             self.sessions.write().await.clear();
             *self.rpc.lock().await = None;
             *self.process.lock().await = None;
-            return Ok(());
+            return errors;
         }
 
         // Best-effort destroy of all active sessions while still connected.
         let sessions: Vec<Arc<Session>> = self.sessions.read().await.values().cloned().collect();
         for session in sessions {
-            let _ = session.destroy().await;
+            if let Err(e) = session.destroy().await {
+                errors.push(StopError {
+                    message: format!("Failed to destroy session {}: {}", session.session_id(), e),
+                    source: Some("session.destroy".into()),
+                });
+            }
         }
         self.sessions.write().await.clear();
 
@@ -556,7 +656,8 @@ impl Client {
         }
 
         *self.state.write().await = ConnectionState::Disconnected;
-        Ok(())
+        *self.models_cache.lock().await = None;
+        errors
     }
 
     /// Force stop the client immediately.
@@ -576,6 +677,7 @@ impl Client {
         }
 
         *self.state.write().await = ConnectionState::Disconnected;
+        *self.models_cache.lock().await = None;
     }
 
     /// Get the current connection state.
@@ -623,6 +725,13 @@ impl Client {
             .create_session_object(session_id.clone(), workspace_path)
             .await;
 
+        // Register hooks from config if provided
+        if let Some(hooks) = config.hooks.take() {
+            if hooks.has_any() {
+                session.register_hooks(hooks).await;
+            }
+        }
+
         // Store session
         self.sessions
             .write()
@@ -669,6 +778,13 @@ impl Client {
         let session = self
             .create_session_object(resumed_id.clone(), workspace_path)
             .await;
+
+        // Register hooks from config if provided
+        if let Some(hooks) = config.hooks.take() {
+            if hooks.has_any() {
+                session.register_hooks(hooks).await;
+            }
+        }
 
         // Store session
         self.sessions
@@ -781,9 +897,19 @@ impl Client {
 
     /// List available models with their metadata.
     ///
+    /// Results are cached after the first call. Use [`clear_models_cache`] to force a refresh.
+    ///
     /// # Errors
     /// Returns an error if not authenticated or if the request fails.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        // Check cache first
+        {
+            let cache = self.models_cache.lock().await;
+            if let Some(cached) = &*cache {
+                return Ok(cached.clone());
+            }
+        }
+
         self.ensure_connected().await?;
 
         let result = self.invoke("models.list", None).await?;
@@ -791,8 +917,71 @@ impl Client {
             .get("models")
             .cloned()
             .unwrap_or_else(|| serde_json::json!([]));
-        serde_json::from_value(models)
-            .map_err(|e| CopilotError::Protocol(format!("Failed to parse models response: {}", e)))
+        let models: Vec<ModelInfo> = serde_json::from_value(models).map_err(|e| {
+            CopilotError::Protocol(format!("Failed to parse models response: {}", e))
+        })?;
+
+        // Store in cache
+        *self.models_cache.lock().await = Some(models.clone());
+
+        Ok(models)
+    }
+
+    /// Clear the cached models list, forcing a fresh fetch on next `list_models()` call.
+    pub async fn clear_models_cache(&self) {
+        *self.models_cache.lock().await = None;
+    }
+
+    /// Get the foreground session ID and workspace path.
+    pub async fn get_foreground_session_id(&self) -> Result<GetForegroundSessionResponse> {
+        self.ensure_connected().await?;
+
+        let result = self.invoke("session.getForeground", None).await?;
+        serde_json::from_value(result).map_err(|e| {
+            CopilotError::Protocol(format!("Failed to parse foreground response: {}", e))
+        })
+    }
+
+    /// Set the foreground session ID.
+    pub async fn set_foreground_session_id(
+        &self,
+        session_id: &str,
+    ) -> Result<SetForegroundSessionResponse> {
+        self.ensure_connected().await?;
+
+        let params = json!({ "sessionId": session_id });
+        let result = self.invoke("session.setForeground", Some(params)).await?;
+        serde_json::from_value(result).map_err(|e| {
+            CopilotError::Protocol(format!("Failed to parse set foreground response: {}", e))
+        })
+    }
+
+    // =========================================================================
+    // Lifecycle Event Handling
+    // =========================================================================
+
+    /// Register a handler for client-level lifecycle events.
+    ///
+    /// Lifecycle events include session created, deleted, updated, foreground, and background.
+    /// Returns an unsubscribe closure that removes the handler when called.
+    pub async fn on<F>(&self, handler: F) -> impl FnOnce()
+    where
+        F: Fn(&SessionLifecycleEvent) + Send + Sync + 'static,
+    {
+        let id = self
+            .next_lifecycle_handler_id
+            .fetch_add(1, Ordering::SeqCst);
+        self.lifecycle_handlers
+            .write()
+            .await
+            .insert(id, Arc::new(handler));
+
+        let handlers = Arc::clone(&self.lifecycle_handlers);
+        move || {
+            tokio::spawn(async move {
+                handlers.write().await.remove(&id);
+            });
+        }
     }
 
     // =========================================================================
@@ -906,6 +1095,17 @@ impl Client {
             args.extend(["--port".to_string(), self.options.port.to_string()]);
         }
 
+        // Wire github_token auth: CLI flag for auth token env var
+        if self.options.github_token.is_some() {
+            args.push("--auth-token-env".to_string());
+            args.push("COPILOT_SDK_AUTH_TOKEN".to_string());
+        }
+
+        // Wire use_logged_in_user: when false, pass --no-auto-login
+        if let Some(false) = self.options.use_logged_in_user {
+            args.push("--no-auto-login".to_string());
+        }
+
         // Resolve command and arguments based on platform
         // On Windows, use cmd /c for PATH resolution if path is not absolute (for .cmd files)
         let (executable, full_args) = resolve_cli_command(&cli_path, &args);
@@ -929,6 +1129,18 @@ impl Client {
 
         // Remove NODE_DEBUG to avoid debug output interfering with JSON-RPC
         proc_options = proc_options.env("NODE_DEBUG", "");
+
+        // Wire github_token auth: pass via environment variable + CLI flag
+        if let Some(ref token) = self.options.github_token {
+            proc_options = proc_options.env("COPILOT_SDK_AUTH_TOKEN", token);
+            args.push("--auth-token-env".to_string());
+            args.push("COPILOT_SDK_AUTH_TOKEN".to_string());
+        }
+
+        // Wire use_logged_in_user: when false, pass --no-auto-login
+        if let Some(false) = self.options.use_logged_in_user {
+            args.push("--no-auto-login".to_string());
+        }
 
         let args_refs: Vec<&str> = full_args.iter().map(|s| s.as_str()).collect();
         let mut process = CopilotProcess::spawn(&executable, &args_refs, proc_options)?;
@@ -996,8 +1208,9 @@ impl Client {
 
         // Clone Arc references for the handlers
         let sessions = Arc::clone(&self.sessions);
+        let lifecycle_handlers = Arc::clone(&self.lifecycle_handlers);
 
-        // Set up notification handler for session events
+        // Set up notification handler for session events and lifecycle events
         rpc.set_notification_handler(move |method, params| {
             if method == "session.event" {
                 let sessions = Arc::clone(&sessions);
@@ -1012,6 +1225,18 @@ impl Client {
                                     session.dispatch_event(event).await;
                                 }
                             }
+                        }
+                    }
+                });
+            } else if method == "session.lifecycle" {
+                let lifecycle_handlers = Arc::clone(&lifecycle_handlers);
+                let params = params.clone();
+
+                tokio::spawn(async move {
+                    if let Ok(event) = serde_json::from_value::<SessionLifecycleEvent>(params) {
+                        let handlers = lifecycle_handlers.read().await;
+                        for handler in handlers.values() {
+                            handler(&event);
                         }
                     }
                 });
@@ -1034,6 +1259,8 @@ impl Client {
                 let result = match method.as_str() {
                     "tool.call" => handle_tool_call(&sessions, &params).await,
                     "permission.request" => handle_permission_request(&sessions, &params).await,
+                    "userInput.request" => handle_user_input_request(&sessions, &params).await,
+                    "hooks.invoke" => handle_hooks_invoke(&sessions, &params).await,
                     _ => {
                         return Err(JsonRpcError::new(
                             -32601,
@@ -1171,6 +1398,18 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a GitHub personal access token for authentication.
+    pub fn github_token(mut self, token: impl Into<String>) -> Self {
+        self.options.github_token = Some(token.into());
+        self
+    }
+
+    /// Set whether to use the logged-in user for auth.
+    pub fn use_logged_in_user(mut self, value: bool) -> Self {
+        self.options.use_logged_in_user = Some(value);
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
         Client::new(self.options)
@@ -1220,6 +1459,28 @@ mod tests {
         let options = ClientOptions {
             use_stdio: true,
             port: 1234,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Client::new(options),
+            Err(CopilotError::InvalidConfig(_))
+        ));
+
+        // github_token + cli_url is invalid
+        let options = ClientOptions {
+            cli_url: Some("localhost:8080".into()),
+            github_token: Some("ghp_abc123".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            Client::new(options),
+            Err(CopilotError::InvalidConfig(_))
+        ));
+
+        // use_logged_in_user + cli_url is invalid
+        let options = ClientOptions {
+            cli_url: Some("localhost:8080".into()),
+            use_logged_in_user: Some(true),
             ..Default::default()
         };
         assert!(matches!(

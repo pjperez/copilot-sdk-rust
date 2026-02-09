@@ -239,6 +239,6 @@ async fn main() -> copilot_sdk::Result<()> {
     }
 
     let _ = session.destroy().await;
-    client.stop().await?;
+    client.stop().await;
     Ok(())
 }
