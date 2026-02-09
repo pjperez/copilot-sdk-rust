@@ -98,7 +98,7 @@ async fn main() -> copilot_sdk::Result<()> {
     println!("Delta events received: {}", delta_count);
     println!("Total characters: {}", total_chars);
 
-    client.stop().await?;
+    client.stop().await;
     println!("\nDone!");
     Ok(())
 }

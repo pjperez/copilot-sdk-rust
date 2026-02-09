@@ -38,10 +38,10 @@ async fn main() -> copilot_sdk::Result<()> {
     client.start().await?;
 
     let session = client.create_session(SessionConfig::default()).await?;
-    let response = session.send_and_wait("Hello!").await?;
+    let response = session.send_and_collect("Hello!", None).await?;
     println!("{}", response);
 
-    client.stop().await?;
+    client.stop().await;
     Ok(())
 }
 ```

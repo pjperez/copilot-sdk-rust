@@ -58,12 +58,12 @@ async fn main() -> copilot_sdk::Result<()> {
 
     for prompt in prompts {
         println!("You: {}\n", prompt);
-        let response = session.send_and_wait(prompt).await?;
+        let response = session.send_and_collect(prompt, None).await?;
         println!("Assistant: {}\n", response);
         println!("---\n");
     }
 
-    client.stop().await?;
+    client.stop().await;
     println!("Done!");
     Ok(())
 }

@@ -71,7 +71,7 @@ async fn main() -> copilot_sdk::Result<()> {
     }
 
     // Stop the client
-    client.stop().await?;
+    client.stop().await;
     println!("Done!");
 
     Ok(())

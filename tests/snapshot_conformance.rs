@@ -518,7 +518,7 @@ async fn snapshot_conformance_tools_and_sessions() -> copilot_sdk::Result<()> {
 
         for turn in &test.turns {
             let before = captured.lock().unwrap().len();
-            let _ = session.send_and_wait(turn.prompt.clone()).await?;
+            let _ = session.send_and_collect(turn.prompt.clone(), None).await?;
             let after = captured.lock().unwrap().len();
 
             let observed = captured.lock().unwrap()[before..after].to_vec();
@@ -537,7 +537,7 @@ async fn snapshot_conformance_tools_and_sessions() -> copilot_sdk::Result<()> {
             }
         }
 
-        client.stop().await?;
+        client.stop().await;
 
         let join = tokio::time::timeout(Duration::from_secs(5), server_task)
             .await

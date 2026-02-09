@@ -158,7 +158,7 @@ async fn test_client_start_and_stop() {
     assert_eq!(client.state().await, ConnectionState::Connected);
 
     // Stop
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
     assert_eq!(client.state().await, ConnectionState::Disconnected);
 }
 
@@ -181,7 +181,7 @@ async fn test_ping_with_message() {
     );
     assert!(response.timestamp > 0);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -195,7 +195,7 @@ async fn test_ping_without_message() {
     // Should have protocol version
     assert!(response.protocol_version.is_some());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -233,7 +233,7 @@ async fn test_create_session() {
 
     assert!(!session.session_id().is_empty());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -254,7 +254,7 @@ async fn test_create_session_with_model() {
 
     assert!(!session.session_id().is_empty());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -280,7 +280,7 @@ async fn test_multiple_sessions() {
     assert!(client.get_session(session1.session_id()).await.is_some());
     assert!(client.get_session(session2.session_id()).await.is_some());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -314,7 +314,7 @@ async fn test_list_sessions() {
     // Note: The session may not appear immediately in the list
     // depending on Copilot CLI timing
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -331,7 +331,11 @@ async fn test_delete_session() {
     let session_id = session.session_id().to_string();
 
     // Send a message to persist the session (matching Python SDK test pattern)
-    let _ = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("Hello")).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Hello", None),
+    )
+    .await;
 
     // Small delay to ensure session file is written to disk
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -345,7 +349,7 @@ async fn test_delete_session() {
     // Session should no longer be in client cache
     assert!(client.get_session(&session_id).await.is_none());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -371,7 +375,7 @@ async fn test_get_last_session_id() {
 
     println!("Last session ID: {:?}", last_id);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -391,7 +395,7 @@ async fn test_simple_chat() {
     // Send a simple message with timeout
     let response = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait("Say 'hello' and nothing else."),
+        session.send_and_collect("Say 'hello' and nothing else.", None),
     )
     .await
     .expect("Timeout waiting for response")
@@ -404,7 +408,7 @@ async fn test_simple_chat() {
         response
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -423,9 +427,9 @@ async fn test_send_message_returns_id() {
     assert!(!message_id.is_empty(), "Message ID should not be empty");
 
     // Wait for idle
-    let _ = tokio::time::timeout(Duration::from_secs(30), session.wait_for_idle()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(30), session.wait_for_idle(None)).await;
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -478,7 +482,7 @@ async fn test_streaming_events() {
     assert!(got_idle, "Did not receive SessionIdle event");
     println!("Received {} streaming deltas", delta_count);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -505,7 +509,7 @@ async fn test_abort_message() {
     // We just verify it doesn't panic
     println!("Abort result: {:?}", abort_result);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -519,7 +523,11 @@ async fn test_get_messages() {
         .expect("Failed to create session");
 
     // Send a message and wait for response
-    let _ = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("Hello")).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Hello", None),
+    )
+    .await;
 
     // Get messages
     let messages = session
@@ -529,7 +537,7 @@ async fn test_get_messages() {
 
     println!("Got {} messages", messages.len());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -584,7 +592,7 @@ async fn test_tool_registration() {
     let registered = session.get_tool("get_weather").await;
     assert!(registered.is_some());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -657,8 +665,9 @@ async fn test_custom_tool_invocation() {
     // Ask the model to use the tool
     let response = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait(
+        session.send_and_collect(
             "Use the get_secret_number tool to look up key 'ALPHA' and tell me the number.",
+            None,
         ),
     )
     .await
@@ -680,7 +689,7 @@ async fn test_custom_tool_invocation() {
         response
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -773,7 +782,7 @@ async fn test_multiple_tools() {
     // Use calculator
     let response = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait("Use the calculate tool to multiply 7 by 6."),
+        session.send_and_collect("Use the calculate tool to multiply 7 by 6.", None),
     )
     .await
     .expect("Timeout")
@@ -789,7 +798,7 @@ async fn test_multiple_tools() {
         response
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -819,7 +828,7 @@ async fn test_permission_callback_is_called() {
     // Ask something that might trigger tool use
     let _ = tokio::time::timeout(
         Duration::from_secs(30),
-        session.send_and_wait("What is 2 + 2? Just answer with the number."),
+        session.send_and_collect("What is 2 + 2? Just answer with the number.", None),
     )
     .await;
 
@@ -828,7 +837,7 @@ async fn test_permission_callback_is_called() {
         permission_count.load(Ordering::SeqCst)
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -858,7 +867,7 @@ async fn test_permission_callback_can_deny() {
     // Simple question - should work even with restrictive permissions
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        session.send_and_wait("Say 'hello' - just that one word."),
+        session.send_and_collect("Say 'hello' - just that one word.", None),
     )
     .await;
 
@@ -870,7 +879,7 @@ async fn test_permission_callback_can_deny() {
         denied_count.load(Ordering::SeqCst)
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -896,17 +905,19 @@ async fn test_system_message_append_mode() {
         .await
         .expect("Failed to create session");
 
-    let response =
-        tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("Say 'hi'."))
-            .await
-            .expect("Timeout")
-            .expect("Failed");
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Say 'hi'.", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed");
 
     println!("Response: {}", response);
     // Note: The model may or may not follow the instruction perfectly
     // The important thing is the session works with system message configured
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -928,14 +939,17 @@ async fn test_system_message_replace_mode() {
         .await
         .expect("Failed to create session");
 
-    let response = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("5 + 5"))
-        .await
-        .expect("Timeout")
-        .expect("Failed");
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("5 + 5", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed");
 
     println!("Calculator response: {}", response);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -983,7 +997,7 @@ async fn test_event_subscription() {
         "Should receive multiple events"
     );
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1031,7 +1045,7 @@ async fn test_background_event_collector() {
     );
     assert!(callback_count.load(Ordering::SeqCst) > 0);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1054,12 +1068,12 @@ async fn test_resume_session() {
     // Send initial message
     let _ = tokio::time::timeout(
         Duration::from_secs(30),
-        session1.send_and_wait("Remember this: the secret code is XYZ123"),
+        session1.send_and_collect("Remember this: the secret code is XYZ123", None),
     )
     .await;
 
     // Stop client
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 
     // Restart and resume
     let client2 = create_test_client()
@@ -1075,7 +1089,7 @@ async fn test_resume_session() {
 
     // Clean up
     session2.destroy().await.expect("Failed to destroy");
-    client2.stop().await.expect("Failed to stop");
+    client2.stop().await;
 }
 
 #[tokio::test]
@@ -1092,11 +1106,14 @@ async fn test_resume_session_with_tools() {
     let session_id = session1.session_id().to_string();
 
     // Send initial message
-    let _ =
-        tokio::time::timeout(Duration::from_secs(30), session1.send_and_wait("Say hello")).await;
+    let _ = tokio::time::timeout(
+        Duration::from_secs(30),
+        session1.send_and_collect("Say hello", None),
+    )
+    .await;
 
     // Stop client
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 
     // Track tool calls
     let tool_called = Arc::new(AtomicBool::new(false));
@@ -1145,7 +1162,7 @@ async fn test_resume_session_with_tools() {
     // Use the tool
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
-        session2.send_and_wait("Use the resume_tool and tell me its result."),
+        session2.send_and_collect("Use the resume_tool and tell me its result.", None),
     )
     .await;
 
@@ -1155,7 +1172,7 @@ async fn test_resume_session_with_tools() {
     );
 
     session2.destroy().await.expect("Failed to destroy");
-    client2.stop().await.expect("Failed to stop");
+    client2.stop().await;
 }
 
 // =============================================================================
@@ -1187,7 +1204,7 @@ async fn test_concurrent_pings() {
         );
     }
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1207,7 +1224,7 @@ async fn test_invalid_session_id() {
 
     assert!(result.is_err(), "Should fail for invalid session ID");
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1221,7 +1238,7 @@ async fn test_send_after_stop() {
         .expect("Failed to create session");
 
     // Stop the client
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 
     // Try to send - should fail gracefully
     let result = session.send("test").await;
@@ -1262,7 +1279,7 @@ async fn test_mcp_server_config_on_create() {
 
     assert!(!session.session_id().is_empty());
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1300,7 +1317,7 @@ async fn test_custom_agent_config_on_create() {
     // Simple interaction to verify session works
     let response = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait("What is 5+5?"),
+        session.send_and_collect("What is 5+5?", None),
     )
     .await
     .expect("Timeout")
@@ -1308,7 +1325,7 @@ async fn test_custom_agent_config_on_create() {
 
     println!("Response from session with custom agent: {}", response);
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1359,11 +1376,11 @@ async fn test_tool_call_id_propagated() {
 
     let _ = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait("Use the id_test_tool now."),
+        session.send_and_collect("Use the id_test_tool now.", None),
     )
     .await;
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1388,9 +1405,9 @@ async fn test_rapid_message_sending() {
     }
 
     // Wait for all to complete
-    let _ = tokio::time::timeout(Duration::from_secs(60), session.wait_for_idle()).await;
+    let _ = tokio::time::timeout(Duration::from_secs(60), session.wait_for_idle(None)).await;
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1407,8 +1424,11 @@ async fn test_session_lifecycle() {
             .unwrap_or_else(|_| panic!("Failed to create session {}", i));
 
         let msg = format!("Hello from session {}", i);
-        let _ = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait(msg.as_str()))
-            .await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(30),
+            session.send_and_collect(msg.as_str(), None),
+        )
+        .await;
 
         session
             .destroy()
@@ -1416,7 +1436,7 @@ async fn test_session_lifecycle() {
             .unwrap_or_else(|_| panic!("Failed to destroy session {}", i));
     }
 
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1503,7 +1523,7 @@ async fn test_full_workflow() {
     // 7. Send message and get response
     let response = tokio::time::timeout(
         Duration::from_secs(60),
-        session.send_and_wait("Use add_numbers to add 17 and 25."),
+        session.send_and_collect("Use add_numbers to add 17 and 25.", None),
     )
     .await
     .expect("Timeout")
@@ -1535,7 +1555,7 @@ async fn test_full_workflow() {
 
     // 10. Clean up
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 
     println!("Full workflow test completed successfully!");
 }
@@ -1577,16 +1597,19 @@ async fn test_infinite_session_config() {
     }
 
     // Session should still work normally
-    let response = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("Hi"))
-        .await
-        .expect("Timeout")
-        .expect("Failed to send message");
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Hi", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to send message");
 
     println!("Infinite session response: {}", response);
     assert!(!response.is_empty(), "Should receive a response");
 
     session.destroy().await.expect("Failed to destroy session");
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1612,7 +1635,7 @@ async fn test_infinite_session_with_custom_thresholds() {
     // Session should work normally
     let response = tokio::time::timeout(
         Duration::from_secs(30),
-        session.send_and_wait("What is 2+2?"),
+        session.send_and_collect("What is 2+2?", None),
     )
     .await
     .expect("Timeout")
@@ -1621,7 +1644,7 @@ async fn test_infinite_session_with_custom_thresholds() {
     println!("Custom threshold session response: {}", response);
 
     session.destroy().await.expect("Failed to destroy session");
-    client.stop().await.expect("Failed to stop client");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1641,10 +1664,13 @@ async fn test_mcp_server_config_on_resume() {
         .expect("Failed to create session");
     let session_id = session1.session_id().to_string();
 
-    tokio::time::timeout(Duration::from_secs(30), session1.send_and_wait("Hi"))
-        .await
-        .expect("Timeout")
-        .expect("Failed to send message");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        session1.send_and_collect("Hi", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to send message");
 
     // Resume with MCP server config
     let resume_config = copilot_sdk::ResumeSessionConfig {
@@ -1672,7 +1698,7 @@ async fn test_mcp_server_config_on_resume() {
     assert_eq!(session2.session_id(), session_id);
 
     session2.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1715,7 +1741,7 @@ async fn test_multiple_mcp_servers() {
     assert!(!session.session_id().is_empty());
 
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1735,10 +1761,13 @@ async fn test_custom_agent_config_on_resume() {
         .expect("Failed to create session");
     let session_id = session1.session_id().to_string();
 
-    tokio::time::timeout(Duration::from_secs(30), session1.send_and_wait("Hi"))
-        .await
-        .expect("Timeout")
-        .expect("Failed to send message");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        session1.send_and_collect("Hi", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to send message");
 
     // Resume with custom agent config
     let resume_config = copilot_sdk::ResumeSessionConfig {
@@ -1760,7 +1789,7 @@ async fn test_custom_agent_config_on_resume() {
     assert_eq!(session2.session_id(), session_id);
 
     session2.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1788,7 +1817,7 @@ async fn test_custom_agent_with_tools() {
     assert!(!session.session_id().is_empty());
 
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1827,7 +1856,7 @@ async fn test_custom_agent_with_mcp_servers() {
     assert!(!session.session_id().is_empty());
 
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1863,7 +1892,7 @@ async fn test_multiple_custom_agents() {
     assert!(!session.session_id().is_empty());
 
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -1902,15 +1931,18 @@ async fn test_combined_mcp_servers_and_custom_agents() {
     assert!(!session.session_id().is_empty());
 
     // Test that session works
-    let response = tokio::time::timeout(Duration::from_secs(30), session.send_and_wait("Hi"))
-        .await
-        .expect("Timeout")
-        .expect("Failed to send message");
+    let response = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Hi", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to send message");
 
     assert!(!response.is_empty());
 
     session.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1930,10 +1962,13 @@ async fn test_resume_session_with_permission_handler() {
         .expect("Failed to create session");
     let session_id = session1.session_id().to_string();
 
-    tokio::time::timeout(Duration::from_secs(30), session1.send_and_wait("Hi"))
-        .await
-        .expect("Timeout")
-        .expect("Failed to send message");
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        session1.send_and_collect("Hi", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to send message");
 
     // Resume with permission handler
     let permission_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1962,7 +1997,7 @@ async fn test_resume_session_with_permission_handler() {
     // Ask to run a command to trigger permission
     let response = tokio::time::timeout(
         Duration::from_secs(30),
-        session2.send_and_wait("Run 'echo hello' for me"),
+        session2.send_and_collect("Run 'echo hello' for me", None),
     )
     .await
     .expect("Timeout")
@@ -1971,7 +2006,7 @@ async fn test_resume_session_with_permission_handler() {
     println!("Permission response: {}", response);
 
     session2.destroy().await.expect("Failed to destroy");
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 // =============================================================================
@@ -1996,7 +2031,7 @@ async fn test_get_status() {
         status.version, status.protocol_version
     );
 
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -2016,7 +2051,7 @@ async fn test_get_auth_status() {
         auth_status.is_authenticated, auth_status.auth_type
     );
 
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
 
 #[tokio::test]
@@ -2033,7 +2068,7 @@ async fn test_list_models() {
 
     if !auth_status.is_authenticated {
         println!("Skipping list_models test - not authenticated");
-        client.stop().await.expect("Failed to stop");
+        client.stop().await;
         return;
     }
 
@@ -2044,5 +2079,5 @@ async fn test_list_models() {
         println!("  - {} ({})", model.name, model.id);
     }
 
-    client.stop().await.expect("Failed to stop");
+    client.stop().await;
 }
