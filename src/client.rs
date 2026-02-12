@@ -13,14 +13,14 @@ use crate::session::Session;
 use crate::types::{
     ClientOptions, ConnectionState, GetAuthStatusResponse, GetForegroundSessionResponse,
     GetStatusResponse, LogLevel, ModelInfo, PingResponse, ProviderConfig, ResumeSessionConfig,
-    SDK_PROTOCOL_VERSION, SessionConfig, SessionLifecycleEvent, SessionMetadata,
-    SetForegroundSessionResponse, StopError,
+    SessionConfig, SessionLifecycleEvent, SessionMetadata, SetForegroundSessionResponse, StopError,
+    SDK_PROTOCOL_VERSION,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{Mutex, RwLock};

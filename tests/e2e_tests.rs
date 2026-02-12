@@ -12,13 +12,13 @@
 #![cfg(feature = "e2e")]
 
 use copilot_sdk::{
-    Client, ConnectionState, CustomAgentConfig, LogLevel, PermissionRequest,
+    find_copilot_cli, Client, ConnectionState, CustomAgentConfig, LogLevel, PermissionRequest,
     PermissionRequestResult, ResumeSessionConfig, SessionConfig, SessionEventData,
-    SystemMessageConfig, SystemMessageMode, Tool, ToolResultObject, find_copilot_cli,
+    SystemMessageConfig, SystemMessageMode, Tool, ToolResultObject,
 };
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 

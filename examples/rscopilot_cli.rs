@@ -13,13 +13,13 @@
 //! - `/approvals bypass all`: auto-approve all permission requests (no prompts)
 
 use copilot_sdk::{
-    Client, LogLevel, PermissionRequest, PermissionRequestResult, SessionConfig, SessionEventData,
-    SystemMessageConfig, SystemMessageMode, find_copilot_cli,
+    find_copilot_cli, Client, LogLevel, PermissionRequest, PermissionRequestResult, SessionConfig,
+    SessionEventData, SystemMessageConfig, SystemMessageMode,
 };
 use std::io::{self, Write};
 use std::sync::{
-    Arc,
     atomic::{AtomicU8, Ordering},
+    Arc,
 };
 
 #[repr(u8)]

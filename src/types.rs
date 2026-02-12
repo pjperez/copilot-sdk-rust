@@ -53,20 +53,24 @@ pub enum AttachmentType {
 /// Log level for the CLI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogLevel {
+    None,
     Debug,
     #[default]
     Info,
     Warn,
     Error,
+    All,
 }
 
 impl std::fmt::Display for LogLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            LogLevel::None => write!(f, "none"),
             LogLevel::Debug => write!(f, "debug"),
             LogLevel::Info => write!(f, "info"),
             LogLevel::Warn => write!(f, "warn"),
             LogLevel::Error => write!(f, "error"),
+            LogLevel::All => write!(f, "all"),
         }
     }
 }
@@ -877,6 +881,10 @@ pub struct ResumeSessionConfig {
     /// If true, skip resuming and create a new session instead.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_resume: bool,
+
+    /// Infinite session configuration for resumed sessions
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub infinite_sessions: Option<InfiniteSessionConfig>,
 
     /// Session hooks for pre/post tool use, session lifecycle, etc.
     #[serde(skip)]
