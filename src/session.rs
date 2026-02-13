@@ -377,11 +377,15 @@ impl Session {
     }
 
     /// Handle a permission request.
+    ///
+    /// Delegates to the registered permission handler, or denies by default
+    /// if no handler is set.
     pub async fn handle_permission_request(
         &self,
         request: &PermissionRequest,
     ) -> PermissionRequestResult {
         let state = self.state.read().await;
+
         if let Some(handler) = &state.permission_handler {
             handler(request)
         } else {

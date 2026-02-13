@@ -210,6 +210,16 @@ impl PermissionRequestResult {
             rules: None,
         }
     }
+
+    /// Returns true if the permission was approved.
+    pub fn is_approved(&self) -> bool {
+        self.kind == "approved"
+    }
+
+    /// Returns true if the permission was denied.
+    pub fn is_denied(&self) -> bool {
+        self.kind.starts_with("denied")
+    }
 }
 
 // =============================================================================
@@ -951,6 +961,31 @@ pub struct ClientOptions {
     /// Whether to use the logged-in user for auth.
     /// Defaults to true when github_token is empty. Cannot be used with `cli_url`.
     pub use_logged_in_user: Option<bool>,
+
+    /// Tool specifications to deny (passed as `--deny-tool` arguments to the CLI).
+    ///
+    /// Each entry follows the CLI's tool specification format:
+    /// - `"shell(git push)"` — deny a specific shell command
+    /// - `"shell(git)"` — deny all git commands
+    /// - `"shell(rm)"` — deny rm commands
+    /// - `"shell"` — deny all shell commands
+    /// - `"write"` — deny file write operations
+    /// - `"MCP_SERVER(tool_name)"` — deny a specific MCP tool
+    ///
+    /// `--deny-tool` takes precedence over `--allow-tool` and `--allow-all-tools`.
+    pub deny_tools: Option<Vec<String>>,
+
+    /// Tool specifications to allow without manual approval
+    /// (passed as `--allow-tool` arguments to the CLI).
+    ///
+    /// Each entry follows the same format as `deny_tools`.
+    pub allow_tools: Option<Vec<String>>,
+
+    /// If true, passes `--allow-all-tools` to the CLI.
+    ///
+    /// This allows Copilot to use any tool without asking for approval.
+    /// Use `deny_tools` in combination to create an allowlist with exceptions.
+    pub allow_all_tools: bool,
 }
 
 impl Default for ClientOptions {
@@ -968,6 +1003,9 @@ impl Default for ClientOptions {
             environment: None,
             github_token: None,
             use_logged_in_user: None,
+            deny_tools: None,
+            allow_tools: None,
+            allow_all_tools: false,
         }
     }
 }
@@ -1257,9 +1295,13 @@ mod tests {
     fn test_permission_result() {
         let approved = PermissionRequestResult::approved();
         assert_eq!(approved.kind, "approved");
+        assert!(approved.is_approved());
+        assert!(!approved.is_denied());
 
         let denied = PermissionRequestResult::denied();
         assert!(denied.kind.starts_with("denied"));
+        assert!(denied.is_denied());
+        assert!(!denied.is_approved());
     }
 
     #[test]
