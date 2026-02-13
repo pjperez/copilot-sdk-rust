@@ -2371,3 +2371,230 @@ async fn test_define_tool_e2e() {
 
     client.stop().await;
 }
+
+// =============================================================================
+// Deny/Allow Tools E2E Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_deny_tool_builder_passes_cli_args() {
+    skip_if_no_cli!();
+
+    // Build client with deny/allow tools — verifies CLI starts successfully
+    // with --deny-tool, --allow-tool, and --allow-all-tools arguments.
+    let client = Client::builder()
+        .use_stdio(true)
+        .log_level(LogLevel::Info)
+        .allow_all_tools(true)
+        .deny_tool("shell(git push)")
+        .deny_tool("shell(rm)")
+        .allow_tool("shell(ls)")
+        .build()
+        .expect("Failed to build client with deny/allow tools");
+
+    client
+        .start()
+        .await
+        .expect("Failed to start client with deny/allow tools");
+
+    // Verify the client is connected and responsive
+    let ping = client.ping(Some("deny-tool test".to_string())).await;
+    assert!(
+        ping.is_ok(),
+        "Ping should succeed with deny/allow tools configured"
+    );
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_deny_tool_allows_safe_command() {
+    skip_if_no_cli!();
+
+    // allow_all_tools + deny specific dangerous ones
+    let client = Client::builder()
+        .use_stdio(true)
+        .log_level(LogLevel::Info)
+        .allow_all_tools(true)
+        .deny_tool("shell(git push)")
+        .deny_tool("shell(rm)")
+        .build()
+        .expect("Failed to build client");
+
+    client.start().await.expect("Failed to start");
+
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    // Permission handler auto-approves (allow_all_tools already pre-approves at CLI level)
+    session
+        .register_permission_handler(|_req| PermissionRequestResult::approved())
+        .await;
+
+    // Ask for a safe operation (echo) — should succeed
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect(
+            "Run 'echo DENY_ALLOW_TEST_OK' and tell me the exact output.",
+            None,
+        ),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to get response");
+
+    println!("deny_tool safe command response: {}", response);
+    assert!(
+        response.contains("DENY_ALLOW_TEST_OK"),
+        "Safe command should succeed with allow_all_tools: {}",
+        response
+    );
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_deny_tool_blocks_denied_command() {
+    skip_if_no_cli!();
+
+    // allow_all_tools but deny 'shell(echo)' specifically
+    let client = Client::builder()
+        .use_stdio(true)
+        .log_level(LogLevel::Info)
+        .allow_all_tools(true)
+        .deny_tool("shell(echo)")
+        .build()
+        .expect("Failed to build client");
+
+    client.start().await.expect("Failed to start");
+
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    // Permission handler auto-approves (but deny_tool at CLI level should block echo)
+    session
+        .register_permission_handler(|_req| PermissionRequestResult::approved())
+        .await;
+
+    // Ask the model to use echo — the CLI should deny it
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect(
+            "Run 'echo SHOULD_NOT_APPEAR' using the shell tool. \
+             If you can't run it, say 'COMMAND_BLOCKED'.",
+            None,
+        ),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to get response");
+
+    println!("deny_tool blocked command response: {}", response);
+
+    // The response should NOT contain the echo output (CLI denied it)
+    assert!(
+        !response.contains("SHOULD_NOT_APPEAR"),
+        "Denied command output should not appear in response: {}",
+        response
+    );
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_deny_tools_batch_builder() {
+    skip_if_no_cli!();
+
+    // Use batch deny_tools() and allow_tools() methods
+    let client = Client::builder()
+        .use_stdio(true)
+        .log_level(LogLevel::Info)
+        .deny_tools(vec!["shell(git push)", "shell(git commit)", "shell(rm)"])
+        .allow_tools(vec!["shell(ls)", "shell(echo)"])
+        .build()
+        .expect("Failed to build client with batch deny/allow");
+
+    client.start().await.expect("Failed to start");
+
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    session
+        .register_permission_handler(|_req| PermissionRequestResult::approved())
+        .await;
+
+    // echo is in the allow list — should work
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect("Run 'echo BATCH_TEST_OK' and tell me the result.", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to get response");
+
+    println!("batch deny/allow response: {}", response);
+    assert!(
+        response.contains("BATCH_TEST_OK"),
+        "Allowed command should succeed with batch allow_tools: {}",
+        response
+    );
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_allow_all_tools_without_denies() {
+    skip_if_no_cli!();
+
+    // allow_all_tools with no denies — everything should work
+    let client = Client::builder()
+        .use_stdio(true)
+        .log_level(LogLevel::Info)
+        .allow_all_tools(true)
+        .build()
+        .expect("Failed to build client");
+
+    client.start().await.expect("Failed to start");
+
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    // No permission handler needed — allow_all_tools auto-approves at CLI level
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect("Run 'echo YOLO_MODE' and tell me the output.", None),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to get response");
+
+    println!("allow_all_tools response: {}", response);
+    assert!(
+        response.contains("YOLO_MODE"),
+        "All tools should be allowed: {}",
+        response
+    );
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_permission_result_is_approved_is_denied() {
+    // Unit-level assertions for is_approved/is_denied convenience methods
+    // (contributed by febbyRG, kept in the trim)
+    let approved = PermissionRequestResult::approved();
+    assert!(approved.is_approved());
+    assert!(!approved.is_denied());
+
+    let denied = PermissionRequestResult::denied();
+    assert!(denied.is_denied());
+    assert!(!denied.is_approved());
+}

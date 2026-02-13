@@ -211,19 +211,6 @@ impl PermissionRequestResult {
         }
     }
 
-    /// Create a denied permission result with a human-readable reason.
-    ///
-    /// The reason is included in the rules so the CLI/LLM can understand
-    /// why the request was denied and adapt its approach.
-    pub fn denied_with_reason(reason: impl Into<String>) -> Self {
-        Self {
-            kind: "denied-no-approval-rule-and-could-not-request-from-user".to_string(),
-            rules: Some(vec![serde_json::json!({
-                "reason": reason.into()
-            })]),
-        }
-    }
-
     /// Returns true if the permission was approved.
     pub fn is_approved(&self) -> bool {
         self.kind == "approved"
@@ -864,24 +851,6 @@ pub struct SessionConfig {
     /// Default: false (explicit configuration preferred over environment variables)
     #[serde(skip)]
     pub auto_byok_from_env: bool,
-
-    /// Command patterns to automatically deny in permission requests.
-    ///
-    /// Each pattern is checked against the `fullCommandText` field in permission
-    /// requests. If any pattern matches (case-insensitive whole-word), the request
-    /// is automatically denied before reaching the user's permission handler.
-    ///
-    /// Example patterns:
-    /// - `"git push"` — deny any command containing "git push"
-    /// - `"git commit"` — deny any command containing "git commit"
-    /// - `"rm -rf"` — deny recursive force removal
-    ///
-    /// This is a safety net that works in addition to `deny_tools` on `ClientOptions`.
-    /// While `deny_tools` prevents the CLI from even attempting the tool call,
-    /// `denied_command_patterns` catches anything that slips through at the
-    /// permission handler level.
-    #[serde(skip)]
-    pub denied_command_patterns: Option<Vec<String>>,
 }
 
 /// Configuration for resuming an existing session.
@@ -936,12 +905,6 @@ pub struct ResumeSessionConfig {
     /// Default: false (explicit configuration preferred over environment variables)
     #[serde(skip)]
     pub auto_byok_from_env: bool,
-
-    /// Command patterns to automatically deny in permission requests.
-    ///
-    /// See [`SessionConfig::denied_command_patterns`] for details.
-    #[serde(skip)]
-    pub denied_command_patterns: Option<Vec<String>>,
 }
 
 /// Options for sending a message.
@@ -1339,16 +1302,6 @@ mod tests {
         assert!(denied.kind.starts_with("denied"));
         assert!(denied.is_denied());
         assert!(!denied.is_approved());
-    }
-
-    #[test]
-    fn test_permission_result_denied_with_reason() {
-        let result = PermissionRequestResult::denied_with_reason("git push is not allowed");
-        assert!(result.is_denied());
-        assert!(result.rules.is_some());
-        let rules = result.rules.unwrap();
-        assert_eq!(rules.len(), 1);
-        assert_eq!(rules[0]["reason"], "git push is not allowed");
     }
 
     #[test]

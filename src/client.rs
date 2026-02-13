@@ -701,9 +701,6 @@ impl Client {
             config.provider = ProviderConfig::from_env();
         }
 
-        // Extract denied_command_patterns before serialization (it's #[serde(skip)])
-        let denied_patterns = config.denied_command_patterns.take().unwrap_or_default();
-
         // Build the request
         let params = serde_json::to_value(&config)?;
 
@@ -735,11 +732,6 @@ impl Client {
             }
         }
 
-        // Apply denied command patterns to the session
-        if !denied_patterns.is_empty() {
-            session.set_denied_command_patterns(denied_patterns).await;
-        }
-
         // Store session
         self.sessions
             .write()
@@ -761,9 +753,6 @@ impl Client {
         if config.auto_byok_from_env && config.provider.is_none() {
             config.provider = ProviderConfig::from_env();
         }
-
-        // Extract denied_command_patterns before serialization (it's #[serde(skip)])
-        let denied_patterns = config.denied_command_patterns.take().unwrap_or_default();
 
         // Build the request
         let mut params = serde_json::to_value(&config)?;
@@ -795,11 +784,6 @@ impl Client {
             if hooks.has_any() {
                 session.register_hooks(hooks).await;
             }
-        }
-
-        // Apply denied command patterns to the session
-        if !denied_patterns.is_empty() {
-            session.set_denied_command_patterns(denied_patterns).await;
         }
 
         // Store session
