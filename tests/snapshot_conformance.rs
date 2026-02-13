@@ -5,7 +5,7 @@
 
 use copilot_sdk::transport::{MessageReader, MessageWriter};
 use copilot_sdk::{Client, LogLevel, SessionConfig, Tool, ToolHandler, ToolResultObject};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -11,12 +11,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 // =============================================================================
 // JSON-RPC 2.0 Message Types
@@ -1095,6 +1095,7 @@ impl TcpJsonRpcClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::MemoryTransport;
     use serde_json::json;
 
     #[test]
@@ -1175,5 +1176,69 @@ mod tests {
 
         let request = JsonRpcRequest::new("method", None, Some(JsonRpcId::Num(1)));
         assert!(!request.is_notification());
+    }
+
+    #[tokio::test]
+    async fn test_large_payload_64kb_boundary() {
+        // Create a payload near 64KB (65536 bytes)
+        let large_data = "x".repeat(65536 - 50); // account for JSON wrapper
+        let msg =
+            serde_json::json!({"jsonrpc": "2.0", "method": "test", "params": {"data": large_data}});
+        let msg_str = serde_json::to_string(&msg).unwrap();
+
+        // Write with framer
+        let transport = MemoryTransport::new(Vec::new());
+        let mut framer = MessageFramer::new(transport);
+        framer.write_message(&msg_str).await.unwrap();
+
+        // Read back from written data
+        let written = framer.transport().written_data().to_vec();
+        let transport2 = MemoryTransport::new(written);
+        let mut framer2 = MessageFramer::new(transport2);
+        let read_back = framer2.read_message().await.unwrap();
+        assert_eq!(msg_str, read_back);
+    }
+
+    #[tokio::test]
+    async fn test_large_payload_100kb() {
+        let large_data = "y".repeat(100_000);
+        let msg =
+            serde_json::json!({"jsonrpc": "2.0", "method": "test", "params": {"data": large_data}});
+        let msg_str = serde_json::to_string(&msg).unwrap();
+
+        let transport = MemoryTransport::new(Vec::new());
+        let mut framer = MessageFramer::new(transport);
+        framer.write_message(&msg_str).await.unwrap();
+
+        let written = framer.transport().written_data().to_vec();
+        let transport2 = MemoryTransport::new(written);
+        let mut framer2 = MessageFramer::new(transport2);
+        let read_back = framer2.read_message().await.unwrap();
+        assert_eq!(msg_str, read_back);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_large_messages_sequential() {
+        let msg1_data = "a".repeat(50_000);
+        let msg2_data = "b".repeat(80_000);
+        let msg1 = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "test1", "params": {"data": msg1_data}});
+        let msg2 = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "test2", "params": {"data": msg2_data}});
+        let msg1_str = serde_json::to_string(&msg1).unwrap();
+        let msg2_str = serde_json::to_string(&msg2).unwrap();
+
+        // Write both messages
+        let transport = MemoryTransport::new(Vec::new());
+        let mut framer = MessageFramer::new(transport);
+        framer.write_message(&msg1_str).await.unwrap();
+        framer.write_message(&msg2_str).await.unwrap();
+
+        // Read both back
+        let written = framer.transport().written_data().to_vec();
+        let transport2 = MemoryTransport::new(written);
+        let mut framer2 = MessageFramer::new(transport2);
+        let read1 = framer2.read_message().await.unwrap();
+        let read2 = framer2.read_message().await.unwrap();
+        assert_eq!(msg1_str, read1);
+        assert_eq!(msg2_str, read2);
     }
 }

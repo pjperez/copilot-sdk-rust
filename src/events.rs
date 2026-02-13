@@ -1294,4 +1294,55 @@ mod tests {
             panic!("Expected SessionStart");
         }
     }
+
+    #[test]
+    fn test_unknown_event_type_handled_gracefully() {
+        let json = json!({
+            "id": "evt_unknown",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "type": "some.future.event.type",
+            "data": {"someField": "someValue"}
+        });
+        // Parsing an unknown event type should not panic
+        let raw: RawSessionEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(raw.event_type, "some.future.event.type");
+
+        // It should also parse into a SessionEvent with Unknown data
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert_eq!(event.event_type, "some.future.event.type");
+        assert!(matches!(event.data, SessionEventData::Unknown(_)));
+    }
+
+    #[test]
+    fn test_session_shutdown_event_parsed() {
+        let json = json!({
+            "id": "evt_shutdown",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "type": "session.shutdown",
+            "data": {
+                "shutdownType": "routine",
+                "reason": "user requested"
+            }
+        });
+        let raw: RawSessionEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(raw.event_type, "session.shutdown");
+
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert_eq!(event.event_type, "session.shutdown");
+    }
+
+    #[test]
+    fn test_session_usage_info_recognized() {
+        let json = json!({
+            "id": "evt_usage",
+            "timestamp": "2025-01-01T00:00:00Z",
+            "type": "session.usage_info",
+            "data": {}
+        });
+        let raw: RawSessionEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(raw.event_type, "session.usage_info");
+
+        let event = SessionEvent::from_json(&json).unwrap();
+        assert_eq!(event.event_type, "session.usage_info");
+    }
 }

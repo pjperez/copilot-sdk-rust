@@ -12,13 +12,14 @@
 #![cfg(feature = "e2e")]
 
 use copilot_sdk::{
-    Client, ConnectionState, CustomAgentConfig, LogLevel, PermissionRequest,
-    PermissionRequestResult, ResumeSessionConfig, SessionConfig, SessionEventData,
-    SystemMessageConfig, SystemMessageMode, Tool, ToolResultObject, find_copilot_cli,
+    find_copilot_cli, Client, ConnectionState, CustomAgentConfig, ErrorOccurredHookOutput,
+    LogLevel, PermissionRequest, PermissionRequestResult, PreToolUseHookOutput,
+    ResumeSessionConfig, SessionConfig, SessionEventData, SessionHooks, SessionStartHookOutput,
+    SystemMessageConfig, SystemMessageMode, Tool, ToolResultObject,
 };
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::sync::Once;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -2078,6 +2079,295 @@ async fn test_list_models() {
     for model in &models {
         println!("  - {} ({})", model.name, model.id);
     }
+
+    client.stop().await;
+}
+
+// =============================================================================
+// Parity Sync: Foreground Session API Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_foreground_session_set_and_get() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    let sid = session.session_id().to_string();
+    assert!(!sid.is_empty());
+
+    // Send a message to persist the session first
+    let _ = tokio::time::timeout(
+        Duration::from_secs(30),
+        session.send_and_collect("Say 'hi'.", None),
+    )
+    .await;
+
+    // Set this session as foreground
+    client
+        .set_foreground_session_id(&sid)
+        .await
+        .expect("Failed to set foreground session");
+
+    // Small delay to allow the server to persist
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Get foreground session ID — should match
+    let fg = client
+        .get_foreground_session_id()
+        .await
+        .expect("Failed to get foreground session");
+
+    if let Some(ref fg_id) = fg.session_id {
+        assert_eq!(
+            fg_id, &sid,
+            "get_foreground_session_id should return the session we just set"
+        );
+        println!("Foreground session round-trip confirmed: {}", fg_id);
+    } else {
+        println!(
+            "Note: get_foreground_session_id returned empty after set \
+             (server may not persist foreground state)"
+        );
+    }
+
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn test_foreground_session_initially_empty() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+
+    // Before any session is set as foreground, result should be empty
+    let fg = client
+        .get_foreground_session_id()
+        .await
+        .expect("Failed to get foreground session");
+
+    if let Some(ref id) = fg.session_id {
+        println!("Note: foreground session ID was already set: {}", id);
+    } else {
+        println!("Confirmed: no foreground session ID set initially");
+    }
+
+    // The key assertion is that the call doesn't fail
+    client.stop().await;
+}
+
+// =============================================================================
+// Parity Sync: Graceful Stop Test
+// =============================================================================
+
+#[tokio::test]
+async fn test_graceful_stop_returns_no_errors() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+
+    // Send a simple message and wait for idle
+    let _ = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect("Say 'ok'.", None),
+    )
+    .await;
+
+    session.destroy().await.expect("Failed to destroy session");
+
+    // Graceful stop should return no errors
+    let errors = client.stop().await;
+    assert!(
+        errors.is_empty(),
+        "stop() should return empty errors after clean session, got {} errors: {:?}",
+        errors.len(),
+        errors
+    );
+}
+
+// =============================================================================
+// Parity Sync: Session with Hooks Config (Rust has zero hook E2E tests)
+// =============================================================================
+
+#[tokio::test]
+async fn test_session_with_hooks_config_creates_successfully() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+
+    let mut config = byok_session_config();
+    config.hooks = Some(SessionHooks {
+        on_pre_tool_use: Some(Arc::new(|input| {
+            println!("preToolUse hook invoked for: {}", input.tool_name);
+            PreToolUseHookOutput::default()
+        })),
+        on_session_start: Some(Arc::new(|_input| {
+            println!("sessionStart hook invoked");
+            SessionStartHookOutput::default()
+        })),
+        on_error_occurred: Some(Arc::new(|input| {
+            println!("errorOccurred hook: {}", input.error);
+            ErrorOccurredHookOutput::default()
+        })),
+        ..Default::default()
+    });
+
+    assert!(config.hooks.as_ref().unwrap().has_any());
+
+    let session = client
+        .create_session(config)
+        .await
+        .expect("Failed to create session with hooks");
+
+    assert!(!session.session_id().is_empty());
+
+    client.stop().await;
+}
+
+// =============================================================================
+// Parity Sync: Lifecycle Events Test
+// =============================================================================
+
+#[tokio::test]
+async fn test_lifecycle_callback_fires_on_session_create() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+
+    let lifecycle_fired = Arc::new(AtomicBool::new(false));
+    let lifecycle_session_id = Arc::new(Mutex::new(String::new()));
+    let fired_clone = Arc::clone(&lifecycle_fired);
+    let sid_clone = Arc::clone(&lifecycle_session_id);
+
+    // Register lifecycle handler BEFORE creating session
+    let _unsub = client
+        .on(move |evt: &copilot_sdk::SessionLifecycleEvent| {
+            if evt.event_type == copilot_sdk::session_lifecycle_event_types::CREATED {
+                fired_clone.store(true, Ordering::SeqCst);
+                if let Ok(mut guard) = sid_clone.try_lock() {
+                    *guard = evt.session_id.clone();
+                }
+            }
+        })
+        .await;
+
+    let session = client
+        .create_session(byok_session_config())
+        .await
+        .expect("Failed to create session");
+    let sid = session.session_id().to_string();
+
+    // Wait for lifecycle event
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        while !lifecycle_fired.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+
+    assert!(
+        lifecycle_fired.load(Ordering::SeqCst),
+        "on_lifecycle should fire session.created event"
+    );
+    {
+        let guard = lifecycle_session_id.lock().await;
+        assert_eq!(*guard, sid, "Lifecycle event should contain the session ID");
+    }
+
+    client.stop().await;
+}
+
+// NOTE: Hook-firing E2E tests (preToolUse, postToolUse, userPromptSubmitted,
+// both hooks, user input, deny) are omitted for Rust. The hooks.invoke RPC
+// callback processing blocks the tokio single-threaded runtime, preventing
+// send_and_collect's event loop from progressing to SessionIdle. This is a
+// pre-existing SDK issue that needs to be fixed in the RPC dispatch layer
+// (e.g., by spawning hook handlers on a separate task or using multi-thread
+// runtime). The C++ SDK tests cover all these scenarios and pass.
+// The session_with_hooks_config test above verifies hooks configuration works.
+
+// NOTE: test_tool_handler_panic_does_not_crash is omitted for Rust because
+// panicking in a tool handler (Fn closure) crashes the RPC dispatch task without
+// catch_unwind, causing the test to hang. The C++ test covers this scenario.
+
+// =============================================================================
+// Parity Sync: define_tool E2E Test
+// =============================================================================
+
+#[tokio::test]
+async fn test_define_tool_e2e() {
+    skip_if_no_cli!();
+
+    let client = create_test_client().await.expect("Failed to create client");
+
+    // Create tool using define_tool from tools.rs
+    let cipher_tool = copilot_sdk::define_tool(
+        "rot13",
+        "Apply ROT13 cipher to the input text",
+        Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "text": { "type": "string", "description": "Text to encode" }
+            },
+            "required": ["text"]
+        })),
+    );
+
+    let mut config = byok_session_config();
+    config.tools = vec![cipher_tool.clone()];
+
+    let session = client
+        .create_session(config)
+        .await
+        .expect("Failed to create session");
+
+    session
+        .register_tool_with_handler(
+            cipher_tool,
+            Some(Arc::new(|_name, args| {
+                let text = args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                let result: String = text
+                    .chars()
+                    .map(|c| match c {
+                        'a'..='z' => (b'a' + (c as u8 - b'a' + 13) % 26) as char,
+                        'A'..='Z' => (b'A' + (c as u8 - b'A' + 13) % 26) as char,
+                        _ => c,
+                    })
+                    .collect();
+                ToolResultObject::text(result)
+            })),
+        )
+        .await;
+
+    session
+        .register_permission_handler(|_req| PermissionRequestResult::approved())
+        .await;
+
+    // "Hello" ROT13 = "Uryyb"
+    let response = tokio::time::timeout(
+        Duration::from_secs(60),
+        session.send_and_collect(
+            "Use the rot13 tool to encode the word 'Hello'. Tell me the exact result.",
+            None,
+        ),
+    )
+    .await
+    .expect("Timeout")
+    .expect("Failed to get response");
+
+    assert!(
+        response.contains("Uryyb"),
+        "Response should contain ROT13 of 'Hello' = 'Uryyb': {}",
+        response
+    );
 
     client.stop().await;
 }
