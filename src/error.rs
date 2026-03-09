@@ -30,8 +30,8 @@ pub enum CopilotError {
     },
 
     /// Protocol version mismatch
-    #[error("Protocol version mismatch: expected {expected}, got {actual}")]
-    ProtocolMismatch { expected: u32, actual: u32 },
+    #[error("Protocol version mismatch: SDK supports versions {min}-{max}, but server reports version {actual}. Please update your SDK or server to ensure compatibility.")]
+    ProtocolMismatch { min: u32, max: u32, actual: u32 },
 
     /// Protocol error (framing, invalid messages, etc.)
     #[error("Protocol error: {0}")]
