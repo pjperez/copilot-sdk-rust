@@ -556,9 +556,6 @@ pub struct SkillInvokedData {
 // Session Event (Discriminated Union)
 // =============================================================================
 
-/// Event data variants - the payload of each event type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
 /// Data for `external_tool.requested` event (protocol v3 broadcast model).
 ///
 /// In protocol v3, tool calls are broadcast as session events instead of
@@ -591,6 +588,8 @@ pub struct PermissionRequestedData {
     pub permission_request: Option<serde_json::Value>,
 }
 
+/// Event data variants - the payload of each event type.
+#[derive(Debug, Clone)]
 pub enum SessionEventData {
     SessionStart(SessionStartData),
     SessionResume(SessionResumeData),
