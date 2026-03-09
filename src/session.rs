@@ -347,16 +347,16 @@ impl Session {
 
                 let result = self.handle_permission_request(&request).await;
 
+                let mut perm_result_inner = serde_json::json!({
+                    "kind": result.kind,
+                });
+                if let Some(rules) = &result.rules {
+                    perm_result_inner["rules"] = serde_json::json!(rules);
+                }
                 let perm_result = serde_json::json!({
                     "sessionId": session_id,
                     "requestId": request_id,
-                    "result": {
-                        "kind": result.kind,
-                        "rules": result.rules,
-                        "feedback": result.feedback,
-                        "message": result.message,
-                        "path": result.path,
-                    }
+                    "result": perm_result_inner,
                 });
 
                 let _ = (self.invoke_fn)(
