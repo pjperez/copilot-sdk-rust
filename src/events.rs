@@ -589,7 +589,7 @@ pub struct PermissionRequestedData {
 }
 
 /// Event data variants - the payload of each event type.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum SessionEventData {
     SessionStart(SessionStartData),
     SessionResume(SessionResumeData),
