@@ -178,19 +178,23 @@ async fn handle_tool_call(
     // Invoke the tool handler
     match session.invoke_tool(tool_name, &arguments).await {
         Ok(result) => Ok(json!({ "result": result })),
-        Err(e) => Ok(json!({
-            "result": {
-                "textResultForLlm": "Tool execution failed",
-                "resultType": "failure",
-                "error": e.to_string()
-            }
-        })),
+        Err(e) => {
+            let error_msg = e.to_string();
+            Ok(json!({
+                "result": {
+                    "textResultForLlm": error_msg,
+                    "resultType": "error",
+                    "error": error_msg
+                }
+            }))
+        }
     }
 }
 
 fn normalize_tool_arguments(params: &Value) -> Value {
     let raw = params
         .get("arguments")
+        .or_else(|| params.get("parameters"))
         .or_else(|| params.get("argumentsJson"))
         .cloned()
         .unwrap_or(json!({}));

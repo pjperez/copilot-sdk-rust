@@ -571,6 +571,8 @@ pub struct ExternalToolRequestedData {
     /// Tool call ID for tracking.
     pub tool_call_id: Option<String>,
     /// Arguments to pass to the tool handler.
+    /// Accepts both "arguments" (standard) and "parameters" (some CLI versions).
+    #[serde(alias = "parameters")]
     pub arguments: Option<serde_json::Value>,
 }
 
