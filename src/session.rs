@@ -271,34 +271,37 @@ impl Session {
                 // Execute tool and respond via handlePendingToolCall RPC
                 match self.invoke_tool(&tool_name, &arguments).await {
                     Ok(result) => {
-                        // If the tool reported a failure with an error, send via top-level error
-                        let params = if result.result_type == "failure" || result.result_type == "error" {
-                            serde_json::json!({
-                                "sessionId": session_id,
-                                "requestId": request_id,
-                                "error": result.error.unwrap_or_else(|| result.text_result_for_llm.clone()),
-                            })
-                        } else {
-                            serde_json::json!({
-                                "sessionId": session_id,
-                                "requestId": request_id,
-                                "result": {
-                                    "textResultForLlm": result.text_result_for_llm,
-                                    "resultType": result.result_type,
-                                    "toolTelemetry": result.tool_telemetry.unwrap_or_default(),
-                                }
-                            })
-                        };
+                        // Always send tool results via the result object so the model
+                        // sees the full error details in textResultForLlm. Sending errors
+                        // via the top-level "error" field causes the CLI to show a generic
+                        // "tool execution failed" message instead of the actionable error.
+                        let params = serde_json::json!({
+                            "sessionId": session_id,
+                            "requestId": request_id,
+                            "result": {
+                                "textResultForLlm": result.text_result_for_llm,
+                                "resultType": result.result_type,
+                                "error": result.error,
+                                "toolTelemetry": result.tool_telemetry.unwrap_or_default(),
+                            }
+                        });
                         let _ = (self.invoke_fn)(
                             "session.tools.handlePendingToolCall",
                             Some(params),
                         ).await;
                     }
                     Err(e) => {
+                        // SDK-level error (tool not found, no handler) — send the error
+                        // message as textResultForLlm so the model can see what went wrong.
+                        let error_msg = e.to_string();
                         let params = serde_json::json!({
                             "sessionId": session_id,
                             "requestId": request_id,
-                            "error": e.to_string(),
+                            "result": {
+                                "textResultForLlm": error_msg,
+                                "resultType": "error",
+                                "error": error_msg,
+                            }
                         });
                         let _ = (self.invoke_fn)(
                             "session.tools.handlePendingToolCall",
