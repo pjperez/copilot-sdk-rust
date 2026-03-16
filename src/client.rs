@@ -417,6 +417,11 @@ async fn detect_tcp_port_from_stdout(stdout: tokio::process::ChildStdout) -> Res
     Ok(port)
 }
 
+async fn active_rpc_handle(rpc: &Arc<Mutex<Option<Arc<RpcClient>>>>) -> Result<Arc<RpcClient>> {
+    let rpc = rpc.lock().await;
+    rpc.as_ref().cloned().ok_or(CopilotError::NotConnected)
+}
+
 enum RpcClient {
     Stdio(StdioJsonRpcClient),
     Tcp(TcpJsonRpcClient),
@@ -519,7 +524,7 @@ pub struct Client {
     state: Arc<RwLock<ConnectionState>>,
     lifecycle: Mutex<()>,
     process: Mutex<Option<CopilotProcess>>,
-    rpc: Arc<Mutex<Option<RpcClient>>>,
+    rpc: Arc<Mutex<Option<Arc<RpcClient>>>>,
     sessions: Arc<RwLock<HashMap<String, Arc<Session>>>>,
     lifecycle_handlers: Arc<RwLock<HashMap<u64, LifecycleHandler>>>,
     next_lifecycle_handler_id: AtomicU64,
@@ -1000,8 +1005,7 @@ impl Client {
 
         loop {
             let result = {
-                let rpc = self.rpc.lock().await;
-                let rpc = rpc.as_ref().ok_or(CopilotError::NotConnected)?;
+                let rpc = active_rpc_handle(&self.rpc).await?;
                 rpc.invoke(method, params.clone()).await
             };
 
@@ -1074,7 +1078,7 @@ impl Client {
             let rpc = TcpJsonRpcClient::connect(addr).await?;
             rpc.start().await?;
 
-            *self.rpc.lock().await = Some(RpcClient::Tcp(rpc));
+            *self.rpc.lock().await = Some(Arc::new(RpcClient::Tcp(rpc)));
             return Ok(());
         }
 
@@ -1197,7 +1201,7 @@ impl Client {
         };
 
         *self.process.lock().await = Some(process);
-        *self.rpc.lock().await = Some(rpc);
+        *self.rpc.lock().await = Some(Arc::new(rpc));
 
         Ok(())
     }
@@ -1207,8 +1211,7 @@ impl Client {
     async fn verify_protocol_version(&self) -> Result<()> {
         // NOTE: We call the underlying RPC directly instead of ping() because ping() calls
         // ensure_connected(), but we haven't set state to Connected yet.
-        let rpc = self.rpc.lock().await;
-        let rpc = rpc.as_ref().ok_or(CopilotError::NotConnected)?;
+        let rpc = active_rpc_handle(&self.rpc).await?;
         let result = rpc
             .invoke("ping", Some(serde_json::json!({ "message": null })))
             .await?;
@@ -1248,8 +1251,7 @@ impl Client {
 
     /// Set up notification and request handlers.
     async fn setup_handlers(&self) -> Result<()> {
-        let rpc = self.rpc.lock().await;
-        let rpc = rpc.as_ref().ok_or(CopilotError::NotConnected)?;
+        let rpc = active_rpc_handle(&self.rpc).await?;
 
         // Clone Arc references for the handlers
         let sessions = Arc::clone(&self.sessions);
@@ -1339,8 +1341,7 @@ impl Client {
             let method = method.to_string();
 
             Box::pin(async move {
-                let rpc = rpc.lock().await;
-                let rpc = rpc.as_ref().ok_or(CopilotError::NotConnected)?;
+                let rpc = active_rpc_handle(&rpc).await?;
                 rpc.invoke(&method, params).await
             }) as crate::session::InvokeFuture
         };
@@ -1703,4 +1704,3 @@ mod tests {
         assert_eq!(normalize_tool_arguments(&params), json!({}));
     }
 }
-
