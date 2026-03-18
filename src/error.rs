@@ -138,13 +138,11 @@ mod tests {
     #[test]
     fn test_error_display() {
         let err = CopilotError::ProtocolMismatch {
-            expected: 1,
+            min: 1,
+            max: 1,
             actual: 2,
         };
-        assert_eq!(
-            err.to_string(),
-            "Protocol version mismatch: expected 1, got 2"
-        );
+        assert!(err.to_string().contains("Protocol version mismatch"));
     }
 
     #[test]

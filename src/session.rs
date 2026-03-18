@@ -275,15 +275,15 @@ impl Session {
                         // sees the full error details in textResultForLlm. Sending errors
                         // via the top-level "error" field causes the CLI to show a generic
                         // "tool execution failed" message instead of the actionable error.
+                        // Use to_value so skip_serializing_if on
+                        // ToolResultObject is respected (avoids null fields
+                        // that corrupt CLI session files).
+                        let result_val = serde_json::to_value(&result)
+                            .unwrap_or_else(|_| serde_json::json!({"textResultForLlm": "serialization error", "resultType": "error"}));
                         let params = serde_json::json!({
                             "sessionId": session_id,
                             "requestId": request_id,
-                            "result": {
-                                "textResultForLlm": result.text_result_for_llm,
-                                "resultType": result.result_type,
-                                "error": result.error,
-                                "toolTelemetry": result.tool_telemetry.unwrap_or_default(),
-                            }
+                            "result": result_val,
                         });
                         let _ = (self.invoke_fn)(
                             "session.tools.handlePendingToolCall",
@@ -380,12 +380,12 @@ impl Session {
     /// Returns the message ID.
     pub async fn send(&self, options: impl Into<MessageOptions>) -> Result<String> {
         let options = options.into();
-        let params = serde_json::json!({
-            "sessionId": self.session_id,
-            "prompt": options.prompt,
-            "attachments": options.attachments,
-            "mode": options.mode,
-        });
+        // Use serde_json::to_value so that #[serde(skip_serializing_if)]
+        // attributes on MessageOptions are respected — otherwise None fields
+        // serialize as null, which corrupts CLI session files on resume.
+        let mut params = serde_json::to_value(&options)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to serialize MessageOptions: {}", e)))?;
+        params["sessionId"] = serde_json::Value::String(self.session_id.clone());
 
         let result = (self.invoke_fn)("session.send", Some(params)).await?;
 
