@@ -149,6 +149,15 @@ impl CopilotProcess {
             Stdio::null()
         });
 
+        // On Windows, prevent child console processes from creating visible
+        // console windows when the parent is a GUI application (e.g. Tauri app
+        // built with `#![windows_subsystem = "windows"]`).
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         // Spawn the process
         let mut child = cmd.spawn().map_err(CopilotError::ProcessStart)?;
 
