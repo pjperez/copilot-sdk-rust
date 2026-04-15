@@ -153,7 +153,7 @@ async fn main() -> copilot_sdk::Result<()> {
     }
     println!("======================");
 
-    session.destroy().await?;
+    session.disconnect().await?;
     client.stop().await;
 
     Ok(())

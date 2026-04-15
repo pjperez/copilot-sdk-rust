@@ -41,23 +41,13 @@ async fn main() -> copilot_sdk::Result<()> {
     let response = session.send_and_collect("Hello!", None).await?;
     println!("{}", response);
 
+    session.disconnect().await?;
     client.stop().await;
     Ok(())
 }
 ```
 
 ## Features
-
-### Infinite Sessions
-
-Automatic context window management that compacts conversation history when approaching token limits:
-
-```rust
-let config = SessionConfig {
-    infinite_sessions: Some(InfiniteSessionConfig::enabled()),
-    ..Default::default()
-};
-```
 
 ### Custom Tools
 
@@ -75,12 +65,123 @@ session.register_tool_with_handler(
 ).await;
 ```
 
+### Slash Commands
+
+Register slash commands that users can invoke:
+
+```rust
+use copilot_sdk::{CommandDefinition, CommandContext, CommandResult};
+use std::sync::Arc;
+
+let help_cmd = CommandDefinition {
+    name: "help".to_string(),
+    description: "Show available commands".to_string(),
+    handler: Some(Arc::new(|_ctx: &CommandContext| CommandResult {
+        message: Some("Available: /help, /status".to_string()),
+        suppress: false,
+    })),
+};
+session.register_command(help_cmd).await;
+```
+
+### Elicitation (Interactive UI Dialogs)
+
+Handle interactive prompts from the CLI:
+
+```rust
+use copilot_sdk::{ElicitationHandler, ElicitationResult};
+use std::sync::Arc;
+
+let handler: ElicitationHandler = Arc::new(|ctx| {
+    match ctx.params.elicitation_type.as_str() {
+        "confirm" => ElicitationResult::accept(serde_json::json!(true)),
+        _ => ElicitationResult::dismiss(),
+    }
+});
+session.register_elicitation_handler(handler).await;
+```
+
+### Blob Attachments
+
+Send inline data without files on disk:
+
+```rust
+use copilot_sdk::{UserMessageAttachment, MessageOptions};
+
+let blob = UserMessageAttachment::blob("csv data here", "text/csv", "data.csv");
+session.send(MessageOptions {
+    prompt: "Analyze this data".to_string(),
+    attachments: Some(vec![blob]),
+    mode: None,
+}).await?;
+```
+
+### Runtime Model Switching
+
+Change the model used by a session at runtime:
+
+```rust
+session.set_model("gpt-4o", None, None).await?;
+```
+
+### System Prompt Section Overrides
+
+Customize system prompt sections:
+
+```rust
+use copilot_sdk::{SectionOverride, SectionOverrideAction, SystemPromptSection};
+
+let config = SessionConfig {
+    section_overrides: Some(vec![
+        SectionOverride {
+            section: SystemPromptSection::Tone,
+            action: SectionOverrideAction::Replace("Be concise and technical.".into()),
+        },
+    ]),
+    ..Default::default()
+};
+```
+
+### Infinite Sessions
+
+Automatic context window management that compacts conversation history when approaching token limits:
+
+```rust
+let config = SessionConfig {
+    infinite_sessions: Some(InfiniteSessionConfig::enabled()),
+    ..Default::default()
+};
+```
+
+### Session Lifecycle Hooks
+
+Intercept tool calls and session events:
+
+```rust
+let config = SessionConfig {
+    hooks: Some(SessionHooks {
+        on_pre_tool_use: Some(Arc::new(|input| {
+            if input.tool_name == "dangerous_tool" {
+                return PreToolUseHookOutput {
+                    permission_decision: Some("deny".into()),
+                    ..Default::default()
+                };
+            }
+            PreToolUseHookOutput::default()
+        })),
+        ..Default::default()
+    }),
+    ..Default::default()
+};
+```
+
 ### Client Utilities
 
 ```rust
 let status = client.get_status().await?;       // CLI version info
 let auth = client.get_auth_status().await?;    // Authentication state
 let models = client.list_models().await?;      // Available models
+let sessions = client.list_sessions(None).await?;  // Active sessions
 ```
 
 ### BYOK (Bring Your Own Key)
@@ -101,9 +202,17 @@ let config = SessionConfig {
 ## Examples
 
 ```bash
-cargo run --example basic_chat
-cargo run --example tool_usage
-cargo run --example streaming
+cargo run --example basic_chat          # Simple chat
+cargo run --example tool_usage          # Tool registration
+cargo run --example fluent_tools        # Builder-pattern tools
+cargo run --example streaming           # Streaming events
+cargo run --example commands            # Slash commands
+cargo run --example elicitation         # Interactive UI dialogs
+cargo run --example blob_attachments    # Inline data attachments
+cargo run --example set_model           # Runtime model switching
+cargo run --example hooks               # Lifecycle hooks
+cargo run --example attachments         # File attachments
+cargo run --example external_server     # External TCP server
 ```
 
 ## Development
