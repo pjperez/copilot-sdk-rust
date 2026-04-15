@@ -28,6 +28,7 @@ async fn main() -> copilot_sdk::Result<()> {
         ]),
         mcp_servers: None,
         infer: Some(true),
+        model: None,
     };
 
     let security_auditor = CustomAgentConfig {
@@ -40,6 +41,7 @@ async fn main() -> copilot_sdk::Result<()> {
         tools: Some(vec!["Read".to_string(), "Grep".to_string()]),
         mcp_servers: None,
         infer: Some(false), // Must use @security-auditor
+        model: None,
     };
 
     let config = SessionConfig {

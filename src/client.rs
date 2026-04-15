@@ -646,10 +646,14 @@ impl Client {
         // Best-effort destroy of all active sessions while still connected.
         let sessions: Vec<Arc<Session>> = self.sessions.read().await.values().cloned().collect();
         for session in sessions {
-            if let Err(e) = session.destroy().await {
+            if let Err(e) = session.disconnect().await {
                 errors.push(StopError {
-                    message: format!("Failed to destroy session {}: {}", session.session_id(), e),
-                    source: Some("session.destroy".into()),
+                    message: format!(
+                        "Failed to disconnect session {}: {}",
+                        session.session_id(),
+                        e
+                    ),
+                    source: Some("session.disconnect".into()),
                 });
             }
         }
@@ -807,10 +811,17 @@ impl Client {
     }
 
     /// List all available sessions.
-    pub async fn list_sessions(&self) -> Result<Vec<SessionMetadata>> {
+    pub async fn list_sessions(
+        &self,
+        filter: Option<crate::types::SessionListFilter>,
+    ) -> Result<Vec<SessionMetadata>> {
         self.ensure_connected().await?;
 
-        let result = self.invoke("session.list", None).await?;
+        let params = filter
+            .and_then(|f| serde_json::to_value(f).ok())
+            .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()));
+
+        let result = self.invoke("session.list", params).await?;
 
         let sessions: Vec<SessionMetadata> = result
             .get("sessions")
@@ -818,6 +829,17 @@ impl Client {
             .unwrap_or_default();
 
         Ok(sessions)
+    }
+
+    /// Get metadata for a specific session.
+    pub async fn get_session_metadata(&self, session_id: &str) -> Result<SessionMetadata> {
+        self.ensure_connected().await?;
+
+        let params = json!({ "sessionId": session_id });
+        let result = self.invoke("session.getMetadata", Some(params)).await?;
+
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse session metadata: {}", e)))
     }
 
     /// Delete a session.
@@ -1229,7 +1251,7 @@ impl Client {
                     actual: 0,
                 });
             }
-            Some(version) if version < MIN_PROTOCOL_VERSION || version > SDK_PROTOCOL_VERSION => {
+            Some(version) if !(MIN_PROTOCOL_VERSION..=SDK_PROTOCOL_VERSION).contains(&version) => {
                 return Err(CopilotError::ProtocolMismatch {
                     min: MIN_PROTOCOL_VERSION,
                     max: SDK_PROTOCOL_VERSION,

@@ -306,7 +306,7 @@ async fn test_list_sessions() {
 
     // List sessions - should include ours (or at least not fail)
     let sessions = client
-        .list_sessions()
+        .list_sessions(None)
         .await
         .expect("Failed to list sessions");
 
@@ -1089,7 +1089,7 @@ async fn test_resume_session() {
     assert_eq!(session2.session_id(), session_id);
 
     // Clean up
-    session2.destroy().await.expect("Failed to destroy");
+    session2.disconnect().await.expect("Failed to destroy");
     client2.stop().await;
 }
 
@@ -1172,7 +1172,7 @@ async fn test_resume_session_with_tools() {
         "Tool should be invoked in resumed session"
     );
 
-    session2.destroy().await.expect("Failed to destroy");
+    session2.disconnect().await.expect("Failed to destroy");
     client2.stop().await;
 }
 
@@ -1301,6 +1301,7 @@ async fn test_custom_agent_config_on_create() {
         tools: None,
         mcp_servers: None,
         infer: Some(true),
+        model: None,
     };
 
     let config = SessionConfig {
@@ -1432,7 +1433,7 @@ async fn test_session_lifecycle() {
         .await;
 
         session
-            .destroy()
+            .disconnect()
             .await
             .unwrap_or_else(|_| panic!("Failed to destroy session {}", i));
     }
@@ -1551,11 +1552,11 @@ async fn test_full_workflow() {
     println!("Session had {} messages", messages.len());
 
     // 9. Verify session is in list
-    let sessions = client.list_sessions().await.expect("Failed to list");
+    let sessions = client.list_sessions(None).await.expect("Failed to list");
     println!("Found {} total sessions", sessions.len());
 
     // 10. Clean up
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 
     println!("Full workflow test completed successfully!");
@@ -1609,7 +1610,10 @@ async fn test_infinite_session_config() {
     println!("Infinite session response: {}", response);
     assert!(!response.is_empty(), "Should receive a response");
 
-    session.destroy().await.expect("Failed to destroy session");
+    session
+        .disconnect()
+        .await
+        .expect("Failed to destroy session");
     client.stop().await;
 }
 
@@ -1644,7 +1648,10 @@ async fn test_infinite_session_with_custom_thresholds() {
 
     println!("Custom threshold session response: {}", response);
 
-    session.destroy().await.expect("Failed to destroy session");
+    session
+        .disconnect()
+        .await
+        .expect("Failed to destroy session");
     client.stop().await;
 }
 
@@ -1698,7 +1705,7 @@ async fn test_mcp_server_config_on_resume() {
 
     assert_eq!(session2.session_id(), session_id);
 
-    session2.destroy().await.expect("Failed to destroy");
+    session2.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1741,7 +1748,7 @@ async fn test_multiple_mcp_servers() {
 
     assert!(!session.session_id().is_empty());
 
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1789,7 +1796,7 @@ async fn test_custom_agent_config_on_resume() {
 
     assert_eq!(session2.session_id(), session_id);
 
-    session2.destroy().await.expect("Failed to destroy");
+    session2.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1817,7 +1824,7 @@ async fn test_custom_agent_with_tools() {
 
     assert!(!session.session_id().is_empty());
 
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1856,7 +1863,7 @@ async fn test_custom_agent_with_mcp_servers() {
 
     assert!(!session.session_id().is_empty());
 
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1892,7 +1899,7 @@ async fn test_multiple_custom_agents() {
 
     assert!(!session.session_id().is_empty());
 
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -1942,7 +1949,7 @@ async fn test_combined_mcp_servers_and_custom_agents() {
 
     assert!(!response.is_empty());
 
-    session.destroy().await.expect("Failed to destroy");
+    session.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -2006,7 +2013,7 @@ async fn test_resume_session_with_permission_handler() {
 
     println!("Permission response: {}", response);
 
-    session2.destroy().await.expect("Failed to destroy");
+    session2.disconnect().await.expect("Failed to destroy");
     client.stop().await;
 }
 
@@ -2181,7 +2188,10 @@ async fn test_graceful_stop_returns_no_errors() {
     )
     .await;
 
-    session.destroy().await.expect("Failed to destroy session");
+    session
+        .disconnect()
+        .await
+        .expect("Failed to destroy session");
 
     // Graceful stop should return no errors
     let errors = client.stop().await;

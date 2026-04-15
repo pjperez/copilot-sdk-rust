@@ -151,7 +151,7 @@ async fn main() -> copilot_sdk::Result<()> {
                 "exit" | "quit" => break,
                 "clear" => {
                     println!("Clearing session...");
-                    let _ = session.destroy().await;
+                    let _ = session.disconnect().await;
                     (session, events) = create_session(&client, approval_mode.clone()).await?;
                     println!("Session: {}", session.session_id());
                 }
@@ -238,7 +238,7 @@ async fn main() -> copilot_sdk::Result<()> {
         }
     }
 
-    let _ = session.destroy().await;
+    let _ = session.disconnect().await;
     client.stop().await;
     Ok(())
 }
