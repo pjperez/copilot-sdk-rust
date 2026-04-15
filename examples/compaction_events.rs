@@ -140,7 +140,7 @@ async fn main() -> copilot_sdk::Result<()> {
     }
 
     println!("\nCleaning up...");
-    session.destroy().await?;
+    session.disconnect().await?;
     client.stop().await;
 
     Ok(())

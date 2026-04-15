@@ -6,12 +6,13 @@
 //! A session represents a conversation with the Copilot CLI.
 
 use crate::error::{CopilotError, Result};
-use crate::events::{SessionEvent, SessionEventData, ExternalToolRequestedData, PermissionRequestedData};
+use crate::events::{SessionEvent, SessionEventData};
 use crate::types::{
-    ErrorOccurredHookInput, MessageOptions, PermissionRequest, PermissionRequestResult,
-    PostToolUseHookInput, PreToolUseHookInput, SessionEndHookInput, SessionHooks,
-    SessionStartHookInput, Tool, ToolResultObject, UserInputInvocation, UserInputRequest,
-    UserInputResponse, UserPromptSubmittedHookInput,
+    CommandContext, CommandDefinition, CommandResult, ElicitationContext, ElicitationHandler,
+    ElicitationParams, ElicitationResult, ErrorOccurredHookInput, MessageOptions,
+    PermissionRequest, PermissionRequestResult, PostToolUseHookInput, PreToolUseHookInput,
+    SessionEndHookInput, SessionHooks, SessionStartHookInput, Tool, ToolResultObject,
+    UserInputInvocation, UserInputRequest, UserInputResponse, UserPromptSubmittedHookInput,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -92,6 +93,10 @@ struct SessionState {
     event_handlers: HashMap<u64, EventHandler>,
     /// Next handler ID.
     next_handler_id: AtomicU64,
+    /// Registered slash commands.
+    commands: HashMap<String, CommandDefinition>,
+    /// Elicitation handler.
+    elicitation_handler: Option<ElicitationHandler>,
 }
 
 /// A Copilot conversation session.
@@ -161,6 +166,8 @@ impl Session {
                 hooks: None,
                 event_handlers: HashMap::new(),
                 next_handler_id: AtomicU64::new(1),
+                commands: HashMap::new(),
+                elicitation_handler: None,
             })),
             invoke_fn: Arc::new(invoke_fn),
         }
@@ -264,7 +271,7 @@ impl Session {
                     return; // This client doesn't handle this tool; another client will.
                 }
 
-                let tool_call_id = data.tool_call_id.clone().unwrap_or_default();
+                let _tool_call_id = data.tool_call_id.clone().unwrap_or_default();
                 let arguments = data.arguments.clone().unwrap_or(serde_json::json!({}));
                 let session_id = self.session_id.clone();
 
@@ -285,10 +292,9 @@ impl Session {
                             "requestId": request_id,
                             "result": result_val,
                         });
-                        let _ = (self.invoke_fn)(
-                            "session.tools.handlePendingToolCall",
-                            Some(params),
-                        ).await;
+                        let _ =
+                            (self.invoke_fn)("session.tools.handlePendingToolCall", Some(params))
+                                .await;
                     }
                     Err(e) => {
                         // SDK-level error (tool not found, no handler) — send the error
@@ -303,10 +309,9 @@ impl Session {
                                 "error": error_msg,
                             }
                         });
-                        let _ = (self.invoke_fn)(
-                            "session.tools.handlePendingToolCall",
-                            Some(params),
-                        ).await;
+                        let _ =
+                            (self.invoke_fn)("session.tools.handlePendingToolCall", Some(params))
+                                .await;
                     }
                 }
             }
@@ -365,7 +370,8 @@ impl Session {
                 let _ = (self.invoke_fn)(
                     "session.permissions.handlePendingPermissionRequest",
                     Some(perm_result),
-                ).await;
+                )
+                .await;
             }
             _ => {} // Not a broadcast request event
         }
@@ -383,8 +389,9 @@ impl Session {
         // Use serde_json::to_value so that #[serde(skip_serializing_if)]
         // attributes on MessageOptions are respected — otherwise None fields
         // serialize as null, which corrupts CLI session files on resume.
-        let mut params = serde_json::to_value(&options)
-            .map_err(|e| CopilotError::Protocol(format!("Failed to serialize MessageOptions: {}", e)))?;
+        let mut params = serde_json::to_value(&options).map_err(|e| {
+            CopilotError::Protocol(format!("Failed to serialize MessageOptions: {}", e))
+        })?;
         params["sessionId"] = serde_json::Value::String(self.session_id.clone());
 
         let result = (self.invoke_fn)("session.send", Some(params)).await?;
@@ -567,6 +574,86 @@ impl Session {
     }
 
     // =========================================================================
+    // Commands
+    // =========================================================================
+
+    /// Register a slash command.
+    pub async fn register_command(&self, command: CommandDefinition) {
+        let mut state = self.state.write().await;
+        state.commands.insert(command.name.clone(), command);
+    }
+
+    /// Register multiple slash commands.
+    pub async fn register_commands(&self, commands: Vec<CommandDefinition>) {
+        let mut state = self.state.write().await;
+        for cmd in commands {
+            state.commands.insert(cmd.name.clone(), cmd);
+        }
+    }
+
+    /// Get a registered command by name.
+    pub async fn get_command(&self, name: &str) -> Option<CommandDefinition> {
+        let state = self.state.read().await;
+        state.commands.get(name).cloned()
+    }
+
+    /// Execute a registered command by name.
+    pub async fn handle_command_execute(
+        &self,
+        command_name: &str,
+        context: &CommandContext,
+    ) -> Result<CommandResult> {
+        let state = self.state.read().await;
+        if let Some(cmd) = state.commands.get(command_name) {
+            if let Some(handler) = &cmd.handler {
+                Ok(handler(context))
+            } else {
+                Ok(CommandResult::default())
+            }
+        } else {
+            Err(CopilotError::Protocol(format!(
+                "Unknown command: {}",
+                command_name
+            )))
+        }
+    }
+
+    // =========================================================================
+    // Elicitation
+    // =========================================================================
+
+    /// Register an elicitation handler for UI dialogs.
+    pub async fn register_elicitation_handler(&self, handler: ElicitationHandler) {
+        let mut state = self.state.write().await;
+        state.elicitation_handler = Some(handler);
+    }
+
+    /// Check if an elicitation handler is registered.
+    pub async fn has_elicitation_handler(&self) -> bool {
+        let state = self.state.read().await;
+        state.elicitation_handler.is_some()
+    }
+
+    /// Handle an elicitation request from the CLI.
+    pub async fn handle_elicitation_request(
+        &self,
+        params: &ElicitationParams,
+    ) -> Result<ElicitationResult> {
+        let state = self.state.read().await;
+        if let Some(handler) = &state.elicitation_handler {
+            let context = ElicitationContext {
+                session_id: self.session_id.clone(),
+                params: params.clone(),
+            };
+            Ok(handler(&context))
+        } else {
+            Err(CopilotError::Protocol(
+                "No elicitation handler registered".into(),
+            ))
+        }
+    }
+
+    // =========================================================================
     // Hooks
     // =========================================================================
 
@@ -677,13 +764,240 @@ impl Session {
     // Lifecycle
     // =========================================================================
 
-    /// Destroy the session.
-    pub async fn destroy(&self) -> Result<()> {
+    /// Disconnect from the session (preferred over `destroy`).
+    pub async fn disconnect(&self) -> Result<()> {
         let params = serde_json::json!({
             "sessionId": self.session_id,
         });
 
         (self.invoke_fn)("session.destroy", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Destroy the session.
+    #[deprecated(since = "0.2.0", note = "Use `disconnect()` instead")]
+    pub async fn destroy(&self) -> Result<()> {
+        self.disconnect().await
+    }
+
+    // =========================================================================
+    // Runtime Model Switching
+    // =========================================================================
+
+    /// Switch the model used by this session at runtime.
+    ///
+    /// Optionally provide a reasoning effort level and/or model capabilities override.
+    pub async fn set_model(
+        &self,
+        model: impl Into<String>,
+        reasoning_effort: Option<String>,
+        model_capabilities: Option<crate::types::ModelCapabilitiesOverride>,
+    ) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "model": model.into(),
+        });
+
+        if let Some(effort) = reasoning_effort {
+            params["reasoningEffort"] = serde_json::Value::String(effort);
+        }
+
+        if let Some(caps) = model_capabilities {
+            if let Ok(caps_val) = serde_json::to_value(caps) {
+                params["modelCapabilities"] = caps_val;
+            }
+        }
+
+        (self.invoke_fn)("session.setModel", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Session Logging
+    // =========================================================================
+
+    /// Send a log message to the CLI runtime.
+    pub async fn log(
+        &self,
+        message: impl Into<String>,
+        level: Option<&str>,
+        ephemeral: Option<bool>,
+    ) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "message": message.into(),
+        });
+
+        if let Some(level) = level {
+            params["level"] = serde_json::Value::String(level.to_string());
+        }
+
+        if let Some(ephemeral) = ephemeral {
+            params["ephemeral"] = serde_json::Value::Bool(ephemeral);
+        }
+
+        (self.invoke_fn)("session.log", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Session Filesystem
+    // =========================================================================
+
+    /// Set up a filesystem provider for this session.
+    pub async fn fs_set_provider(
+        &self,
+        request: crate::types::SessionFsSetProviderRequest,
+    ) -> Result<crate::types::SessionFsSetProviderResult> {
+        let params = serde_json::to_value(&request)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to serialize request: {}", e)))?;
+        let result = (self.invoke_fn)("session.fs.setProvider", Some(params)).await?;
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid setProvider response: {}", e)))
+    }
+
+    /// Read a file from the session filesystem.
+    pub async fn fs_read_file(&self, path: &str) -> Result<String> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.fs.readFile", Some(params)).await?;
+        let parsed: crate::types::SessionFsReadFileResult = serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid readFile response: {}", e)))?;
+        Ok(parsed.content)
+    }
+
+    /// Write content to a file in the session filesystem.
+    pub async fn fs_write_file(&self, path: &str, content: &str, mode: Option<u32>) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+            "content": content,
+        });
+        if let Some(m) = mode {
+            params["mode"] = serde_json::Value::Number(m.into());
+        }
+        (self.invoke_fn)("session.fs.writeFile", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Append content to a file in the session filesystem.
+    pub async fn fs_append_file(&self, path: &str, content: &str, mode: Option<u32>) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+            "content": content,
+        });
+        if let Some(m) = mode {
+            params["mode"] = serde_json::Value::Number(m.into());
+        }
+        (self.invoke_fn)("session.fs.appendFile", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Check if a path exists in the session filesystem.
+    pub async fn fs_exists(&self, path: &str) -> Result<bool> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.fs.exists", Some(params)).await?;
+        let parsed: crate::types::SessionFsExistsResult = serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid exists response: {}", e)))?;
+        Ok(parsed.exists)
+    }
+
+    /// Get file/directory stat information from the session filesystem.
+    pub async fn fs_stat(&self, path: &str) -> Result<crate::types::SessionFsStatResult> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.fs.stat", Some(params)).await?;
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid stat response: {}", e)))
+    }
+
+    /// Create a directory in the session filesystem.
+    pub async fn fs_mkdir(
+        &self,
+        path: &str,
+        mode: Option<u32>,
+        recursive: Option<bool>,
+    ) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        if let Some(m) = mode {
+            params["mode"] = serde_json::Value::Number(m.into());
+        }
+        if let Some(r) = recursive {
+            params["recursive"] = serde_json::Value::Bool(r);
+        }
+        (self.invoke_fn)("session.fs.mkdir", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Read directory entries (names only) from the session filesystem.
+    pub async fn fs_readdir(&self, path: &str) -> Result<Vec<String>> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.fs.readdir", Some(params)).await?;
+        let parsed: crate::types::SessionFsReaddirResult = serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid readdir response: {}", e)))?;
+        Ok(parsed.entries)
+    }
+
+    /// Read directory entries with type information from the session filesystem.
+    pub async fn fs_readdir_with_types(
+        &self,
+        path: &str,
+    ) -> Result<Vec<crate::types::SessionFsDirEntry>> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.fs.readdirWithTypes", Some(params)).await?;
+        let parsed: crate::types::SessionFsReaddirWithTypesResult = serde_json::from_value(result)
+            .map_err(|e| {
+                CopilotError::Protocol(format!("Invalid readdirWithTypes response: {}", e))
+            })?;
+        Ok(parsed.entries)
+    }
+
+    /// Remove a file or directory from the session filesystem.
+    pub async fn fs_rm(
+        &self,
+        path: &str,
+        force: Option<bool>,
+        recursive: Option<bool>,
+    ) -> Result<()> {
+        let mut params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        if let Some(f) = force {
+            params["force"] = serde_json::Value::Bool(f);
+        }
+        if let Some(r) = recursive {
+            params["recursive"] = serde_json::Value::Bool(r);
+        }
+        (self.invoke_fn)("session.fs.rm", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Rename a file or directory in the session filesystem.
+    pub async fn fs_rename(&self, src: &str, dest: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "src": src,
+            "dest": dest,
+        });
+        (self.invoke_fn)("session.fs.rename", Some(params)).await?;
         Ok(())
     }
 }
