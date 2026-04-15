@@ -1730,8 +1730,8 @@ pub struct TelemetryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     /// Whether to capture content in telemetry.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub capture_content: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_content: Option<bool>,
 }
 
 // =============================================================================
@@ -1826,6 +1826,148 @@ pub struct SessionFsReaddirResult {
 #[serde(rename_all = "camelCase")]
 pub struct SessionFsReaddirWithTypesResult {
     pub entries: Vec<SessionFsDirEntry>,
+}
+
+// =============================================================================
+// Session Mode
+// =============================================================================
+
+/// Session operating mode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    Interactive,
+    Plan,
+    Autopilot,
+}
+
+// =============================================================================
+// Plan Types
+// =============================================================================
+
+/// Data for a session plan.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanData {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+// =============================================================================
+// Agent Types
+// =============================================================================
+
+/// Information about an available agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentInfo {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Options for starting a fleet of agents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FleetStartOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+// =============================================================================
+// Shell Execution Types
+// =============================================================================
+
+/// Signal to send to a shell process.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
+pub enum ShellSignal {
+    SIGINT,
+    SIGKILL,
+    SIGTERM,
+}
+
+/// Options for executing a shell command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellExecOptions {
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+}
+
+/// Result of executing a shell command.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellExecResult {
+    pub process_id: String,
+}
+
+// =============================================================================
+// Workspace Types
+// =============================================================================
+
+/// A file in the workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFile {
+    pub path: String,
+    #[serde(default)]
+    pub size: Option<u64>,
+    #[serde(default)]
+    pub modified_at: Option<String>,
+}
+
+// =============================================================================
+// Tools List / Quota Types
+// =============================================================================
+
+/// Information about a tool available to the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolInfo {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub parameters: Option<serde_json::Value>,
+}
+
+/// Result of listing tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolsListResult {
+    #[serde(default)]
+    pub tools: Vec<ToolInfo>,
+}
+
+/// A snapshot of quota usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaSnapshot {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub used: Option<u64>,
+    #[serde(default)]
+    pub resets_at: Option<String>,
+}
+
+/// Result of querying account quota.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuotaResult {
+    #[serde(default)]
+    pub quotas: Vec<QuotaSnapshot>,
 }
 
 // =============================================================================

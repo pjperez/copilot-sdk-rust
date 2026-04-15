@@ -53,6 +53,8 @@ pub use error::{CopilotError, Result};
 pub use types::{
     // Session lifecycle event type constants
     session_lifecycle_event_types,
+    // Agent types
+    AgentInfo,
     // Enums
     AttachmentType,
     // Config types
@@ -77,6 +79,8 @@ pub use types::{
     ErrorOccurredHookOutput,
     // External server config
     ExternalServerConfig,
+    // Fleet types
+    FleetStartOptions,
     // Response types
     GetAuthStatusResponse,
     GetForegroundSessionResponse,
@@ -103,6 +107,8 @@ pub use types::{
     PermissionRequest,
     PermissionRequestResult,
     PingResponse,
+    // Plan types
+    PlanData,
     PostToolUseHandler,
     PostToolUseHookInput,
     PostToolUseHookOutput,
@@ -110,6 +116,9 @@ pub use types::{
     PreToolUseHookInput,
     PreToolUseHookOutput,
     ProviderConfig,
+    // Quota types
+    QuotaResult,
+    QuotaSnapshot,
     // Reasoning effort
     ReasoningEffort,
     ResumeSessionConfig,
@@ -144,11 +153,17 @@ pub use types::{
     // Session list filter
     SessionListFilter,
     SessionMetadata,
+    // Session mode
+    SessionMode,
     SessionStartHandler,
     SessionStartHookInput,
     SessionStartHookOutput,
     SessionUiCapabilities,
     SetForegroundSessionResponse,
+    // Shell execution
+    ShellExecOptions,
+    ShellExecResult,
+    ShellSignal,
     StopError,
     SystemMessageConfig,
     SystemMessageMode,
@@ -159,10 +174,12 @@ pub use types::{
     // Tool types
     Tool,
     ToolBinaryResult,
+    ToolInfo,
     ToolInvocation,
     ToolResult,
     ToolResultObject,
     ToolResultType,
+    ToolsListResult,
     // User input types
     UserInputInvocation,
     UserInputRequest,
@@ -171,6 +188,8 @@ pub use types::{
     UserPromptSubmittedHandler,
     UserPromptSubmittedHookInput,
     UserPromptSubmittedHookOutput,
+    // Workspace types
+    WorkspaceFile,
     // Constants
     SDK_PROTOCOL_VERSION,
 };
