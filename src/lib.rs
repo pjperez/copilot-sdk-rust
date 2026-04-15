@@ -46,7 +46,7 @@ pub mod transport;
 pub mod types;
 
 // Re-export tool utilities
-pub use tools::define_tool;
+pub use tools::{convert_mcp_call_tool_result, define_tool};
 
 // Re-export main types at crate root for convenience
 pub use error::{CopilotError, Result};
@@ -58,12 +58,25 @@ pub use types::{
     // Config types
     AzureOptions,
     ClientOptions,
+    // Command types
+    CommandContext,
+    CommandDefinition,
+    CommandHandler,
+    CommandResult,
     ConnectionState,
     CustomAgentConfig,
+    // Elicitation types
+    ElicitationContext,
+    ElicitationHandler,
+    ElicitationOption,
+    ElicitationParams,
+    ElicitationResult,
     // Hook types
     ErrorOccurredHandler,
     ErrorOccurredHookInput,
     ErrorOccurredHookOutput,
+    // External server config
+    ExternalServerConfig,
     // Response types
     GetAuthStatusResponse,
     GetForegroundSessionResponse,
@@ -76,11 +89,16 @@ pub use types::{
     MessageOptions,
     ModelBilling,
     ModelCapabilities,
+    // Model override types
+    ModelCapabilitiesOverride,
     ModelInfo,
     ModelLimits,
+    ModelLimitsOverride,
     ModelPolicy,
     ModelSupports,
+    ModelSupportsOverride,
     ModelVisionLimits,
+    ModelVisionLimitsOverride,
     // Permission types
     PermissionRequest,
     PermissionRequestResult,
@@ -92,33 +110,59 @@ pub use types::{
     PreToolUseHookInput,
     PreToolUseHookOutput,
     ProviderConfig,
+    // Reasoning effort
+    ReasoningEffort,
     ResumeSessionConfig,
+    // System prompt section types
+    SectionOverride,
+    SectionOverrideAction,
     // Selection types
     SelectionAttachment,
     SelectionPosition,
     SelectionRange,
+    // Session capabilities
+    SessionCapabilities,
     SessionConfig,
     SessionEndHandler,
     SessionEndHookInput,
     SessionEndHookOutput,
+    // Session FS types
+    SessionFsConventions,
+    SessionFsDirEntry,
+    SessionFsDirEntryType,
+    SessionFsExistsResult,
+    SessionFsReadFileResult,
+    SessionFsReaddirResult,
+    SessionFsReaddirWithTypesResult,
+    SessionFsSetProviderRequest,
+    SessionFsSetProviderResult,
+    SessionFsStatResult,
     SessionHooks,
     // Session lifecycle types
     SessionLifecycleEvent,
     SessionLifecycleEventMetadata,
+    // Session list filter
+    SessionListFilter,
     SessionMetadata,
     SessionStartHandler,
     SessionStartHookInput,
     SessionStartHookOutput,
+    SessionUiCapabilities,
     SetForegroundSessionResponse,
     StopError,
     SystemMessageConfig,
     SystemMessageMode,
+    // System prompt section enum
+    SystemPromptSection,
+    // Telemetry config
+    TelemetryConfig,
     // Tool types
     Tool,
     ToolBinaryResult,
     ToolInvocation,
     ToolResult,
     ToolResultObject,
+    ToolResultType,
     // User input types
     UserInputInvocation,
     UserInputRequest,
@@ -143,11 +187,15 @@ pub use events::{
     AssistantTurnEndData,
     AssistantTurnStartData,
     AssistantUsageData,
+    CommandCompleteData,
+    CommandStartData,
     CompactionTokensUsed,
     CustomAgentCompletedData,
     CustomAgentFailedData,
     CustomAgentSelectedData,
     CustomAgentStartedData,
+    ElicitationRequestData,
+    ElicitationResponseData,
     HandoffSourceType,
     HookEndData,
     HookError,

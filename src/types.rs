@@ -53,6 +53,47 @@ pub enum AttachmentType {
     File,
     Directory,
     Selection,
+    Blob,
+}
+
+/// Result type for tool execution outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolResultType {
+    Success,
+    Failure,
+    Rejected,
+    Denied,
+    Timeout,
+}
+
+impl Default for ToolResultType {
+    fn default() -> Self {
+        Self::Success
+    }
+}
+
+impl std::fmt::Display for ToolResultType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success => write!(f, "success"),
+            Self::Failure => write!(f, "failure"),
+            Self::Rejected => write!(f, "rejected"),
+            Self::Denied => write!(f, "denied"),
+            Self::Timeout => write!(f, "timeout"),
+        }
+    }
+}
+
+/// Reasoning effort level for model requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[serde(rename = "xhigh")]
+    XHigh,
 }
 
 /// Log level for the CLI.
@@ -408,8 +449,55 @@ pub struct CustomAgentConfig {
 pub struct UserMessageAttachment {
     #[serde(rename = "type")]
     pub attachment_type: AttachmentType,
-    pub path: String,
+    /// File/directory path (used for File, Directory, Selection types).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub display_name: String,
+    /// Base64-encoded binary data (used for Blob type).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
+    /// MIME type for blob attachments (e.g., "image/png").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+}
+
+impl UserMessageAttachment {
+    /// Create a file attachment.
+    pub fn file(path: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            attachment_type: AttachmentType::File,
+            path: Some(path.into()),
+            display_name: display_name.into(),
+            data: None,
+            media_type: None,
+        }
+    }
+
+    /// Create a directory attachment.
+    pub fn directory(path: impl Into<String>, display_name: impl Into<String>) -> Self {
+        Self {
+            attachment_type: AttachmentType::Directory,
+            path: Some(path.into()),
+            display_name: display_name.into(),
+            data: None,
+            media_type: None,
+        }
+    }
+
+    /// Create a blob attachment (e.g., for images).
+    pub fn blob(
+        data: impl Into<String>,
+        media_type: impl Into<String>,
+        display_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            attachment_type: AttachmentType::Blob,
+            path: None,
+            display_name: display_name.into(),
+            data: Some(data.into()),
+            media_type: Some(media_type.into()),
+        }
+    }
 }
 
 // =============================================================================
@@ -455,7 +543,10 @@ pub struct Tool {
     pub name: String,
     pub description: String,
     pub parameters_schema: serde_json::Value,
-    // Handler is stored separately in Session since it's not Clone-friendly
+    /// If true, this tool does not require permission approval.
+    pub skip_permission: bool,
+    /// If true, this tool overrides a built-in tool with the same name.
+    pub overrides_built_in_tool: bool,
 }
 
 impl Tool {
@@ -465,6 +556,8 @@ impl Tool {
             name: name.into(),
             description: String::new(),
             parameters_schema: serde_json::json!({}),
+            skip_permission: false,
+            overrides_built_in_tool: false,
         }
     }
 
@@ -530,6 +623,18 @@ impl Tool {
         }
         self
     }
+
+    /// Mark this tool as not requiring permission approval.
+    pub fn skip_permission(mut self, skip: bool) -> Self {
+        self.skip_permission = skip;
+        self
+    }
+
+    /// Mark this tool as overriding a built-in tool with the same name.
+    pub fn overrides_built_in_tool(mut self, overrides: bool) -> Self {
+        self.overrides_built_in_tool = overrides;
+        self
+    }
 }
 
 impl std::fmt::Debug for Tool {
@@ -548,10 +653,23 @@ impl Serialize for Tool {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Tool", 3)?;
+        let mut field_count = 3;
+        if self.skip_permission {
+            field_count += 1;
+        }
+        if self.overrides_built_in_tool {
+            field_count += 1;
+        }
+        let mut state = serializer.serialize_struct("Tool", field_count)?;
         state.serialize_field("name", &self.name)?;
         state.serialize_field("description", &self.description)?;
         state.serialize_field("parameters", &self.parameters_schema)?;
+        if self.skip_permission {
+            state.serialize_field("skipPermission", &self.skip_permission)?;
+        }
+        if self.overrides_built_in_tool {
+            state.serialize_field("overridesBuiltInTool", &self.overrides_built_in_tool)?;
+        }
         state.end()
     }
 }
@@ -858,6 +976,18 @@ pub struct SessionConfig {
     /// Default: false (explicit configuration preferred over environment variables)
     #[serde(skip)]
     pub auto_byok_from_env: bool,
+
+    /// Command definitions for slash commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<CommandDefinition>>,
+
+    /// Whether to request elicitation from the server.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "requestElicitation")]
+    pub request_elicitation: Option<bool>,
+
+    /// System prompt section overrides for granular prompt customization.
+    #[serde(skip)]
+    pub section_overrides: Option<Vec<SectionOverride>>,
 }
 
 /// Configuration for resuming an existing session.
@@ -993,6 +1123,9 @@ pub struct ClientOptions {
     /// This allows Copilot to use any tool without asking for approval.
     /// Use `deny_tools` in combination to create an allowlist with exceptions.
     pub allow_all_tools: bool,
+
+    /// Telemetry configuration.
+    pub telemetry: Option<TelemetryConfig>,
 }
 
 impl Default for ClientOptions {
@@ -1013,6 +1146,7 @@ impl Default for ClientOptions {
             deny_tools: None,
             allow_tools: None,
             allow_all_tools: false,
+            telemetry: None,
         }
     }
 }
@@ -1020,6 +1154,27 @@ impl Default for ClientOptions {
 // =============================================================================
 // Response Types
 // =============================================================================
+
+/// Filter criteria for listing sessions.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListFilter {
+    /// Filter by session status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Filter by model name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Only return sessions created after this time (ISO 8601).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Only return sessions modified before this time (ISO 8601).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    /// Maximum number of sessions to return.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
 
 /// Metadata about a session.
 #[derive(Debug, Clone, Deserialize)]
@@ -1146,6 +1301,54 @@ pub struct ModelInfo {
 }
 
 // =============================================================================
+// Model Override Types (for runtime model switching)
+// =============================================================================
+
+/// Override for model capabilities (partial; all fields optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilitiesOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supports: Option<ModelSupportsOverride>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<ModelLimitsOverride>,
+}
+
+/// Override for what a model supports (partial; all fields optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSupportsOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<bool>,
+}
+
+/// Override for model vision limits (partial; all fields optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelVisionLimitsOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supported_media_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prompt_images: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prompt_image_size: Option<u64>,
+}
+
+/// Override for model limits (partial; all fields optional).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelLimitsOverride {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_prompt_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_window_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vision: Option<ModelVisionLimitsOverride>,
+}
+
+// =============================================================================
 // Selection Attachment Types
 // =============================================================================
 
@@ -1261,6 +1464,368 @@ pub struct SetForegroundSessionResponse {
     pub success: bool,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+// =============================================================================
+// Command Types
+// =============================================================================
+
+/// Context passed to a command handler when a slash command is invoked.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandContext {
+    pub session_id: String,
+    #[serde(default)]
+    pub arguments: Option<String>,
+    #[serde(default)]
+    pub raw_input: Option<String>,
+}
+
+/// Handler function type for commands.
+pub type CommandHandler = Arc<dyn Fn(&CommandContext) -> CommandResult + Send + Sync>;
+
+/// Result returned by a command handler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResult {
+    /// Text to display or send as a follow-up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// If true, suppress the command from being sent to the model.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub suppress: bool,
+}
+
+/// Definition of a slash command that can be registered with a session.
+#[derive(Clone)]
+pub struct CommandDefinition {
+    pub name: String,
+    pub description: String,
+    /// The handler function (stored separately, not serializable).
+    pub handler: Option<CommandHandler>,
+}
+
+impl std::fmt::Debug for CommandDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandDefinition")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("has_handler", &self.handler.is_some())
+            .finish()
+    }
+}
+
+impl Serialize for CommandDefinition {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("CommandDefinition", 2)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("description", &self.description)?;
+        state.end()
+    }
+}
+
+// =============================================================================
+// Elicitation Types
+// =============================================================================
+
+/// Parameters for an elicitation request from the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationParams {
+    /// Unique ID for this elicitation request.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// The type of elicitation (e.g., "confirm", "select", "input").
+    #[serde(rename = "type")]
+    pub elicitation_type: String,
+    /// Message/question to display.
+    pub message: String,
+    /// Available options for select-type elicitations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<ElicitationOption>>,
+    /// JSON Schema for the expected input shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<serde_json::Value>,
+    /// Title for the elicitation dialog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// An option in a select-type elicitation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationOption {
+    pub label: String,
+    pub value: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Result of an elicitation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationResult {
+    /// The action taken: "accept", "dismiss", or "cancel".
+    pub action: String,
+    /// The selected/entered value(s), if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+impl ElicitationResult {
+    /// Create an accepted result with a value.
+    pub fn accept(value: serde_json::Value) -> Self {
+        Self {
+            action: "accept".to_string(),
+            value: Some(value),
+        }
+    }
+
+    /// Create a dismissed result (user closed without confirming).
+    pub fn dismiss() -> Self {
+        Self {
+            action: "dismiss".to_string(),
+            value: None,
+        }
+    }
+
+    /// Create a cancelled result.
+    pub fn cancel() -> Self {
+        Self {
+            action: "cancel".to_string(),
+            value: None,
+        }
+    }
+}
+
+/// Context passed to an elicitation handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationContext {
+    pub session_id: String,
+    pub params: ElicitationParams,
+}
+
+/// Handler function type for elicitation requests.
+pub type ElicitationHandler = Arc<dyn Fn(&ElicitationContext) -> ElicitationResult + Send + Sync>;
+
+// =============================================================================
+// Session Capabilities
+// =============================================================================
+
+/// UI capabilities that a session supports.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUiCapabilities {
+    #[serde(default)]
+    pub elicitation: bool,
+    #[serde(default)]
+    pub commands: bool,
+}
+
+/// Overall capabilities of a session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCapabilities {
+    #[serde(default)]
+    pub ui: SessionUiCapabilities,
+}
+
+// =============================================================================
+// System Prompt Section Types
+// =============================================================================
+
+/// Identifies a section of the system prompt for granular overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemPromptSection {
+    Identity,
+    Tone,
+    ToolEfficiency,
+    EnvironmentContext,
+    CodeChangeRules,
+    Guidelines,
+    Safety,
+    ToolInstructions,
+    CustomInstructions,
+    LastInstructions,
+}
+
+/// Action to take when overriding a system prompt section.
+#[derive(Clone)]
+pub enum SectionOverrideAction {
+    /// Replace the section content entirely.
+    Replace(String),
+    /// Remove the section.
+    Remove,
+    /// Append to the section.
+    Append(String),
+    /// Prepend to the section.
+    Prepend(String),
+    /// Transform the section using a function.
+    Transform(Arc<dyn Fn(&str) -> String + Send + Sync>),
+}
+
+/// A section override for the system prompt.
+#[derive(Clone)]
+pub struct SectionOverride {
+    pub section: SystemPromptSection,
+    pub action: SectionOverrideAction,
+}
+
+impl std::fmt::Debug for SectionOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SectionOverride")
+            .field("section", &self.section)
+            .field("action", &self.action)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SectionOverrideAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Replace(s) => f.debug_tuple("Replace").field(s).finish(),
+            Self::Remove => write!(f, "Remove"),
+            Self::Append(s) => f.debug_tuple("Append").field(s).finish(),
+            Self::Prepend(s) => f.debug_tuple("Prepend").field(s).finish(),
+            Self::Transform(_) => write!(f, "Transform(fn)"),
+        }
+    }
+}
+
+// =============================================================================
+// External Server Config
+// =============================================================================
+
+/// Configuration for connecting to an external (already-running) Copilot server.
+#[derive(Debug, Clone)]
+pub struct ExternalServerConfig {
+    /// URL of the running server (e.g., "http://localhost:3000").
+    pub url: String,
+}
+
+// =============================================================================
+// Telemetry Config
+// =============================================================================
+
+/// Configuration for SDK telemetry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelemetryConfig {
+    /// OTLP endpoint URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub otlp_endpoint: Option<String>,
+    /// File path for file-based telemetry export.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+    /// Exporter type (e.g., "otlp", "file").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exporter_type: Option<String>,
+    /// Source name for telemetry events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    /// Whether to capture content in telemetry.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub capture_content: bool,
+}
+
+// =============================================================================
+// Session FS Types
+// =============================================================================
+
+/// Path conventions for the session filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionFsConventions {
+    Posix,
+    Windows,
+}
+
+/// Configuration for setting up a session filesystem provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsSetProviderRequest {
+    /// Path conventions used by this filesystem.
+    pub conventions: SessionFsConventions,
+    /// Initial working directory for sessions.
+    pub initial_cwd: String,
+    /// Path within each session's FS where the runtime stores files.
+    pub session_state_path: String,
+}
+
+/// Result from setting up a session filesystem provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsSetProviderResult {
+    pub success: bool,
+}
+
+/// Result of reading a file from the session filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsReadFileResult {
+    pub content: String,
+}
+
+/// Result of checking if a path exists in the session filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsExistsResult {
+    pub exists: bool,
+}
+
+/// File stat information from the session filesystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsStatResult {
+    /// ISO 8601 timestamp of creation.
+    pub birthtime: String,
+    /// Whether the path is a directory.
+    pub is_directory: bool,
+    /// Whether the path is a file.
+    pub is_file: bool,
+    /// ISO 8601 timestamp of last modification.
+    pub mtime: String,
+    /// File size in bytes.
+    pub size: u64,
+}
+
+/// Entry type in a directory listing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionFsDirEntryType {
+    File,
+    Directory,
+}
+
+/// A directory entry with type information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsDirEntry {
+    /// Entry name.
+    pub name: String,
+    /// Entry type.
+    #[serde(rename = "type")]
+    pub entry_type: SessionFsDirEntryType,
+}
+
+/// Result of reading directory entries (names only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsReaddirResult {
+    pub entries: Vec<String>,
+}
+
+/// Result of reading directory entries with type information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFsReaddirWithTypesResult {
+    pub entries: Vec<SessionFsDirEntry>,
 }
 
 // =============================================================================

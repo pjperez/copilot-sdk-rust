@@ -556,6 +556,56 @@ pub struct SkillInvokedData {
 // Session Event (Discriminated Union)
 // =============================================================================
 
+/// Data for `command.start` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandStartData {
+    #[serde(default)]
+    pub command_name: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<String>,
+}
+
+/// Data for `command.complete` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandCompleteData {
+    #[serde(default)]
+    pub command_name: Option<String>,
+    #[serde(default)]
+    pub success: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Data for `elicitation.request` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationRequestData {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub elicitation_type: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
+}
+
+/// Data for `elicitation.response` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationResponseData {
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
+}
+
 /// Data for `external_tool.requested` event (protocol v3 broadcast model).
 ///
 /// In protocol v3, tool calls are broadcast as session events instead of
@@ -630,6 +680,14 @@ pub enum SessionEventData {
     SessionSnapshotRewind(SessionSnapshotRewindData),
     SessionUsageInfo(SessionUsageInfoData),
     SkillInvoked(SkillInvokedData),
+    /// Command execution started.
+    CommandStart(CommandStartData),
+    /// Command execution completed.
+    CommandComplete(CommandCompleteData),
+    /// Elicitation request.
+    ElicitationRequest(ElicitationRequestData),
+    /// Elicitation response.
+    ElicitationResponse(ElicitationResponseData),
     /// External tool requested (protocol v3 broadcast).
     ExternalToolRequested(ExternalToolRequestedData),
     /// Permission requested (protocol v3 broadcast).
@@ -883,6 +941,18 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "skill.invoked" => serde_json::from_value(data)
             .map(SessionEventData::SkillInvoked)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "command.start" => serde_json::from_value(data)
+            .map(SessionEventData::CommandStart)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "command.complete" => serde_json::from_value(data)
+            .map(SessionEventData::CommandComplete)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "elicitation.request" => serde_json::from_value(data)
+            .map(SessionEventData::ElicitationRequest)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "elicitation.response" => serde_json::from_value(data)
+            .map(SessionEventData::ElicitationResponse)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "external_tool.requested" => serde_json::from_value(data)
             .map(SessionEventData::ExternalToolRequested)

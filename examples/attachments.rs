@@ -38,8 +38,10 @@ fn divide(a: i32, b: i32) -> i32 {
         prompt: "Review this code for bugs.".to_string(),
         attachments: Some(vec![UserMessageAttachment {
             attachment_type: AttachmentType::File,
-            path: sample_file.to_string_lossy().to_string(),
+            path: Some(sample_file.to_string_lossy().to_string()),
             display_name: "sample.rs".to_string(),
+            data: None,
+            media_type: None,
         }]),
         mode: None,
     };

@@ -79,6 +79,90 @@ pub fn define_tool(name: &str, description: &str, parameters_schema: Option<Valu
         name: name.to_string(),
         description: description.to_string(),
         parameters_schema: parameters_schema.unwrap_or(serde_json::json!({})),
+        skip_permission: false,
+        overrides_built_in_tool: false,
+    }
+}
+
+/// Convert an MCP `CallToolResult` (as a JSON Value) into a SDK `ToolResultObject`.
+///
+/// Maps MCP content blocks:
+/// - `text` blocks → concatenated into `text_result_for_llm`
+/// - `image` blocks → converted to `ToolBinaryResult` entries
+/// - `resource` blocks → text representation appended
+///
+/// The `isError` field on the MCP result maps to `result_type: "failure"`.
+pub fn convert_mcp_call_tool_result(call_result: &Value) -> ToolResultObject {
+    use crate::types::ToolBinaryResult;
+
+    let is_error = call_result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut binary_results: Vec<ToolBinaryResult> = Vec::new();
+
+    if let Some(content) = call_result.get("content").and_then(|v| v.as_array()) {
+        for item in content {
+            let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match item_type {
+                "text" => {
+                    if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                        text_parts.push(text.to_string());
+                    }
+                }
+                "image" => {
+                    let data = item
+                        .get("data")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let mime_type = item
+                        .get("mimeType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("image/png")
+                        .to_string();
+                    binary_results.push(ToolBinaryResult {
+                        data,
+                        mime_type,
+                        result_type: "image".to_string(),
+                        description: None,
+                    });
+                }
+                "resource" => {
+                    if let Some(resource) = item.get("resource") {
+                        if let Some(text) = resource.get("text").and_then(|v| v.as_str()) {
+                            let uri = resource.get("uri").and_then(|v| v.as_str()).unwrap_or("");
+                            text_parts.push(format!("[resource: {}]\n{}", uri, text));
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown content type — serialize as JSON
+                    if let Ok(s) = serde_json::to_string(item) {
+                        text_parts.push(s);
+                    }
+                }
+            }
+        }
+    }
+
+    ToolResultObject {
+        text_result_for_llm: text_parts.join("\n"),
+        binary_results_for_llm: if binary_results.is_empty() {
+            None
+        } else {
+            Some(binary_results)
+        },
+        result_type: if is_error {
+            "failure".to_string()
+        } else {
+            "success".to_string()
+        },
+        error: None,
+        session_log: None,
+        tool_telemetry: None,
     }
 }
 

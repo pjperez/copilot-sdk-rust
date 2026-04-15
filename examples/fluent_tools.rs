@@ -200,7 +200,7 @@ async fn main() -> copilot_sdk::Result<()> {
     // Cleanup
     println!("\n=== Fluent Tools E2E Complete ===");
 
-    session.destroy().await?;
+    session.disconnect().await?;
     client.stop().await;
 
     println!("Session destroyed, client stopped.");
