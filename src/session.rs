@@ -1000,6 +1000,202 @@ impl Session {
         (self.invoke_fn)("session.fs.rename", Some(params)).await?;
         Ok(())
     }
+
+    // =========================================================================
+    // Session Mode
+    // =========================================================================
+
+    /// Get the current session mode.
+    pub async fn get_mode(&self) -> Result<crate::types::SessionMode> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        let result = (self.invoke_fn)("session.mode.get", Some(params)).await?;
+        let mode_str = result
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CopilotError::Protocol("Missing mode in response".into()))?;
+        serde_json::from_value(serde_json::json!(mode_str))
+            .map_err(|e| CopilotError::Protocol(format!("Invalid mode '{}': {}", mode_str, e)))
+    }
+
+    /// Set the session mode.
+    pub async fn set_mode(&self, mode: crate::types::SessionMode) -> Result<()> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "mode": mode,
+        });
+        (self.invoke_fn)("session.mode.set", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Plan Operations
+    // =========================================================================
+
+    /// Read the current session plan.
+    pub async fn read_plan(&self) -> Result<Option<crate::types::PlanData>> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        let result = (self.invoke_fn)("session.plan.read", Some(params)).await?;
+        if result.is_null() || result.get("content").is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(result)
+            .map(Some)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse plan: {}", e)))
+    }
+
+    /// Update the session plan.
+    pub async fn update_plan(&self, plan: &crate::types::PlanData) -> Result<()> {
+        let mut params = serde_json::to_value(plan)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to serialize plan: {}", e)))?;
+        params["sessionId"] = serde_json::json!(self.session_id);
+        (self.invoke_fn)("session.plan.update", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Delete the session plan.
+    pub async fn delete_plan(&self) -> Result<()> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        (self.invoke_fn)("session.plan.delete", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Agent Management
+    // =========================================================================
+
+    /// List available agents for this session.
+    pub async fn list_agents(&self) -> Result<Vec<crate::types::AgentInfo>> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        let result = (self.invoke_fn)("session.agent.list", Some(params)).await?;
+        let agents = result
+            .get("agents")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        serde_json::from_value(agents)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse agents: {}", e)))
+    }
+
+    /// Get the currently selected agent.
+    pub async fn get_current_agent(&self) -> Result<Option<crate::types::AgentInfo>> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        let result = (self.invoke_fn)("session.agent.get_current", Some(params)).await?;
+        if result.is_null() || result.get("name").is_none() {
+            return Ok(None);
+        }
+        serde_json::from_value(result)
+            .map(Some)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse agent: {}", e)))
+    }
+
+    /// Select an agent by name.
+    pub async fn select_agent(&self, agent_name: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "agentName": agent_name,
+        });
+        (self.invoke_fn)("session.agent.select", Some(params)).await?;
+        Ok(())
+    }
+
+    /// Deselect the current agent.
+    pub async fn deselect_agent(&self) -> Result<()> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        (self.invoke_fn)("session.agent.deselect", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Fleet
+    // =========================================================================
+
+    /// Start a fleet of agents.
+    pub async fn start_fleet(
+        &self,
+        options: Option<crate::types::FleetStartOptions>,
+    ) -> Result<()> {
+        let mut params = serde_json::json!({ "sessionId": self.session_id });
+        if let Some(opts) = options {
+            if let Some(prompt) = opts.prompt {
+                params["prompt"] = serde_json::json!(prompt);
+            }
+        }
+        (self.invoke_fn)("session.fleet.start", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Shell Execution
+    // =========================================================================
+
+    /// Execute a shell command in the session.
+    pub async fn shell_exec(
+        &self,
+        options: crate::types::ShellExecOptions,
+    ) -> Result<crate::types::ShellExecResult> {
+        let mut params = serde_json::to_value(&options).map_err(|e| {
+            CopilotError::Protocol(format!("Failed to serialize shell options: {}", e))
+        })?;
+        params["sessionId"] = serde_json::json!(self.session_id);
+        let result = (self.invoke_fn)("session.shell.exec", Some(params)).await?;
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse shell result: {}", e)))
+    }
+
+    /// Kill a running shell process.
+    pub async fn shell_kill(
+        &self,
+        process_id: &str,
+        signal: crate::types::ShellSignal,
+    ) -> Result<()> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "processId": process_id,
+            "signal": signal,
+        });
+        (self.invoke_fn)("session.shell.kill", Some(params)).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Workspace Operations
+    // =========================================================================
+
+    /// List files in the workspace.
+    pub async fn workspace_list_files(&self) -> Result<Vec<crate::types::WorkspaceFile>> {
+        let params = serde_json::json!({ "sessionId": self.session_id });
+        let result = (self.invoke_fn)("session.workspace.list_files", Some(params)).await?;
+        let files = result
+            .get("files")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        serde_json::from_value(files)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse workspace files: {}", e)))
+    }
+
+    /// Read a file from the workspace.
+    pub async fn workspace_read_file(&self, path: &str) -> Result<String> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+        });
+        let result = (self.invoke_fn)("session.workspace.read_file", Some(params)).await?;
+        result
+            .get("content")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| CopilotError::Protocol("Missing content in response".into()))
+    }
+
+    /// Create a file in the workspace.
+    pub async fn workspace_create_file(&self, path: &str, content: &str) -> Result<()> {
+        let params = serde_json::json!({
+            "sessionId": self.session_id,
+            "path": path,
+            "content": content,
+        });
+        (self.invoke_fn)("session.workspace.create_file", Some(params)).await?;
+        Ok(())
+    }
 }
 
 // =============================================================================

@@ -989,6 +989,28 @@ impl Client {
         })
     }
 
+    /// List available tools, optionally filtered by model.
+    pub async fn tools_list(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<crate::types::ToolsListResult> {
+        self.ensure_connected().await?;
+
+        let params = model_id.map(|id| json!({ "modelId": id }));
+        let result = self.invoke("tools.list", params).await?;
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse tools list: {}", e)))
+    }
+
+    /// Get account quota information.
+    pub async fn get_quota(&self) -> Result<crate::types::QuotaResult> {
+        self.ensure_connected().await?;
+
+        let result = self.invoke("account.get_quota", None).await?;
+        serde_json::from_value(result)
+            .map_err(|e| CopilotError::Protocol(format!("Failed to parse quota result: {}", e)))
+    }
+
     // =========================================================================
     // Lifecycle Event Handling
     // =========================================================================
@@ -1561,6 +1583,12 @@ impl ClientBuilder {
     /// ```
     pub fn allow_all_tools(mut self, allow: bool) -> Self {
         self.options.allow_all_tools = allow;
+        self
+    }
+
+    /// Set telemetry configuration.
+    pub fn telemetry(mut self, config: crate::types::TelemetryConfig) -> Self {
+        self.options.telemetry = Some(config);
         self
     }
 
