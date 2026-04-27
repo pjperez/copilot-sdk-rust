@@ -367,11 +367,19 @@ impl Session {
                     "result": perm_result_inner,
                 });
 
-                let _ = (self.invoke_fn)(
+                if let Err(err) = (self.invoke_fn)(
                     "session.permissions.handlePendingPermissionRequest",
                     Some(perm_result),
                 )
-                .await;
+                .await
+                {
+                    tracing::warn!(
+                        "Failed to respond to permission request {} for session {}: {}",
+                        request_id,
+                        session_id,
+                        err
+                    );
+                }
             }
             _ => {} // Not a broadcast request event
         }
