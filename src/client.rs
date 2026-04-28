@@ -12,9 +12,9 @@ use crate::process::{CopilotProcess, ProcessOptions};
 use crate::session::Session;
 use crate::types::{
     ClientOptions, ConnectionState, GetAuthStatusResponse, GetForegroundSessionResponse,
-    GetStatusResponse, LogLevel, ModelInfo, PingResponse, ProviderConfig, ResumeSessionConfig,
-    SessionConfig, SessionLifecycleEvent, SessionMetadata, SetForegroundSessionResponse, StopError,
-    MIN_PROTOCOL_VERSION, SDK_PROTOCOL_VERSION,
+    GetStatusResponse, LogLevel, ModelInfo, PermissionRequestResult, PingResponse, ProviderConfig,
+    ResumeSessionConfig, SessionConfig, SessionLifecycleEvent, SessionMetadata,
+    SetForegroundSessionResponse, StopError, MIN_PROTOCOL_VERSION, SDK_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -263,19 +263,25 @@ async fn handle_permission_request(
     };
 
     let result = session.handle_permission_request(&request).await;
+    Ok(json!({
+        "result": permission_result_to_user_response(result)
+    }))
+}
 
-    // Build response
-    let mut response = json!({
-        "result": {
-            "kind": result.kind
+fn permission_result_to_user_response(result: PermissionRequestResult) -> Value {
+    match result.kind.as_str() {
+        // The legacy `permission.request` RPC is used by the CLI's ACP-style
+        // user permission adapters, which expect a user choice. Protocol v3
+        // `permission.requested` broadcasts still use the final `approved`
+        // shape in Session::handle_broadcast_event.
+        "approved" => json!({ "kind": "approve-once" }),
+        "denied-no-approval-rule-and-could-not-request-from-user" => {
+            json!({ "kind": "user-not-available" })
         }
-    });
-
-    if let Some(rules) = result.rules {
-        response["result"]["rules"] = Value::Array(rules);
+        "denied-interactively-by-user" => json!({ "kind": "reject" }),
+        _ if result.kind.starts_with("denied") => json!({ "kind": "reject" }),
+        _ => json!({ "kind": "reject" }),
     }
-
-    Ok(response)
 }
 
 /// Handle a userInput.request from the server.
@@ -1628,6 +1634,18 @@ mod tests {
                 "shell(git add)".to_string(),
             ])
         );
+    }
+
+    #[test]
+    fn test_permission_result_to_user_response_maps_approval_for_legacy_rpc() {
+        let response = permission_result_to_user_response(PermissionRequestResult::approved());
+        assert_eq!(response, json!({ "kind": "approve-once" }));
+    }
+
+    #[test]
+    fn test_permission_result_to_user_response_maps_default_denial_for_legacy_rpc() {
+        let response = permission_result_to_user_response(PermissionRequestResult::denied());
+        assert_eq!(response, json!({ "kind": "user-not-available" }));
     }
 
     #[test]
