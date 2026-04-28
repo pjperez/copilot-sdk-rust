@@ -65,6 +65,7 @@ pub use types::{
     CommandResult,
     ConnectionState,
     CustomAgentConfig,
+    DefaultAgentConfig,
     // Elicitation types
     ElicitationContext,
     ElicitationHandler,
@@ -187,6 +188,8 @@ pub use events::{
     AssistantTurnEndData,
     AssistantTurnStartData,
     AssistantUsageData,
+    CapabilitiesChangedData,
+    CapabilitiesChangedUi,
     CommandCompleteData,
     CommandStartData,
     CompactionTokensUsed,

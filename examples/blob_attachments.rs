@@ -34,6 +34,7 @@ async fn main() -> copilot_sdk::Result<()> {
         prompt: "Summarize the data in this CSV. Answer in one sentence.".to_string(),
         attachments: Some(vec![blob]),
         mode: None,
+        request_headers: None,
     };
     session.send(opts).await?;
 
