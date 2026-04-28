@@ -44,6 +44,7 @@ fn divide(a: i32, b: i32) -> i32 {
             media_type: None,
         }]),
         mode: None,
+        request_headers: None,
     };
 
     println!("Sending with attachment: {}\n", sample_file.display());

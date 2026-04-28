@@ -1302,6 +1302,7 @@ async fn test_custom_agent_config_on_create() {
         mcp_servers: None,
         infer: Some(true),
         model: None,
+        skills: None,
     };
 
     let config = SessionConfig {

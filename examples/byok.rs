@@ -25,6 +25,7 @@ async fn main() -> copilot_sdk::Result<()> {
         api_key: api_key.clone(),
         bearer_token: None,
         azure: None,
+        headers: None,
     };
 
     // Azure provider config (example)
@@ -37,6 +38,7 @@ async fn main() -> copilot_sdk::Result<()> {
         azure: Some(AzureOptions {
             api_version: Some("2024-02-15-preview".to_string()),
         }),
+        headers: None,
     };
 
     let config = SessionConfig {
