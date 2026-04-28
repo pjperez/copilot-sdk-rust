@@ -305,6 +305,8 @@ pub struct ProviderConfig {
     pub bearer_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub azure: Option<AzureOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
 }
 
 // Environment variable names for BYOK configuration
@@ -354,6 +356,7 @@ impl ProviderConfig {
             wire_api: None,
             bearer_token: None,
             azure: None,
+            headers: None,
         })
     }
 
@@ -437,6 +440,17 @@ pub struct CustomAgentConfig {
     pub infer: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<String>>,
+}
+
+/// Configuration for the built-in default agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultAgentConfig {
+    /// Tool names to hide from the default agent while keeping them available to sub-agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_tools: Option<Vec<String>>,
 }
 
 // =============================================================================
@@ -925,6 +939,8 @@ pub struct SessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub config_dir: Option<PathBuf>,
@@ -938,12 +954,20 @@ pub struct SessionConfig {
     pub excluded_tools: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_capabilities: Option<ModelCapabilitiesOverride>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub streaming: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_sub_agent_streaming_events: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<DefaultAgentConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_directories: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -967,6 +991,14 @@ pub struct SessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
 
+    /// Per-session GitHub token for authentication.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitHubToken")]
+    pub github_token: Option<String>,
+
+    /// How environment values are transferred to the runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_value_mode: Option<String>,
+
     /// Session hooks for pre/post tool use, session lifecycle, etc.
     #[serde(skip)]
     pub hooks: Option<SessionHooks>,
@@ -988,6 +1020,10 @@ pub struct SessionConfig {
     /// System prompt section overrides for granular prompt customization.
     #[serde(skip)]
     pub section_overrides: Option<Vec<SectionOverride>>,
+
+    /// Whether to discover config files such as MCP server configs from the working directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_config_discovery: Option<bool>,
 }
 
 /// Configuration for resuming an existing session.
@@ -995,17 +1031,33 @@ pub struct SessionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_message: Option<SystemMessageConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub excluded_tools: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_capabilities: Option<ModelCapabilitiesOverride>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub streaming: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub include_sub_agent_streaming_events: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers: Option<HashMap<String, serde_json::Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub custom_agents: Option<Vec<CustomAgentConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<DefaultAgentConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_directories: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1025,6 +1077,14 @@ pub struct ResumeSessionConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working_directory: Option<String>,
 
+    /// Per-session GitHub token for authentication.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitHubToken")]
+    pub github_token: Option<String>,
+
+    /// How environment values are transferred to the runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_value_mode: Option<String>,
+
     /// If true, skip resuming and create a new session instead.
     #[serde(default, skip_serializing_if = "is_false")]
     pub disable_resume: bool,
@@ -1042,6 +1102,18 @@ pub struct ResumeSessionConfig {
     /// Default: false (explicit configuration preferred over environment variables)
     #[serde(skip)]
     pub auto_byok_from_env: bool,
+
+    /// Command definitions for slash commands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<Vec<CommandDefinition>>,
+
+    /// Whether to request elicitation from the server.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "requestElicitation")]
+    pub request_elicitation: Option<bool>,
+
+    /// Whether to discover config files such as MCP server configs from the working directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_config_discovery: Option<bool>,
 }
 
 /// Options for sending a message.
@@ -1053,6 +1125,8 @@ pub struct MessageOptions {
     pub attachments: Option<Vec<UserMessageAttachment>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_headers: Option<HashMap<String, String>>,
 }
 
 impl From<&str> for MessageOptions {
@@ -1061,6 +1135,7 @@ impl From<&str> for MessageOptions {
             prompt: prompt.to_string(),
             attachments: None,
             mode: None,
+            request_headers: None,
         }
     }
 }
@@ -1071,6 +1146,7 @@ impl From<String> for MessageOptions {
             prompt,
             attachments: None,
             mode: None,
+            request_headers: None,
         }
     }
 }
@@ -1126,6 +1202,9 @@ pub struct ClientOptions {
 
     /// Telemetry configuration.
     pub telemetry: Option<TelemetryConfig>,
+
+    /// Server-wide session idle timeout in seconds. None or 0 disables idle cleanup.
+    pub session_idle_timeout_seconds: Option<u64>,
 }
 
 impl Default for ClientOptions {
@@ -1147,6 +1226,7 @@ impl Default for ClientOptions {
             allow_tools: None,
             allow_all_tools: false,
             telemetry: None,
+            session_idle_timeout_seconds: None,
         }
     }
 }
@@ -1893,23 +1973,50 @@ mod tests {
     fn test_session_config_serialization_with_new_fields() {
         let config = SessionConfig {
             session_id: Some("sess-1".into()),
+            client_name: Some("rust-app".into()),
             model: Some("gpt-4.1".into()),
+            model_capabilities: Some(ModelCapabilitiesOverride {
+                supports: Some(ModelSupportsOverride {
+                    reasoning_effort: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
             config_dir: Some(PathBuf::from("/tmp/copilot")),
             streaming: true,
+            include_sub_agent_streaming_events: Some(false),
+            default_agent: Some(DefaultAgentConfig {
+                excluded_tools: Some(vec!["shell".into()]),
+            }),
+            agent: Some("code-reviewer".into()),
             skill_directories: Some(vec!["skills".into()]),
             disabled_skills: Some(vec!["legacy_skill".into()]),
             request_permission: Some(true),
+            github_token: Some("token".into()),
+            env_value_mode: Some("direct".into()),
+            enable_config_discovery: Some(true),
             ..Default::default()
         };
 
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["sessionId"], "sess-1");
+        assert_eq!(value["clientName"], "rust-app");
         assert_eq!(value["model"], "gpt-4.1");
+        assert_eq!(
+            value["modelCapabilities"]["supports"]["reasoningEffort"],
+            true
+        );
         assert_eq!(value["configDir"], "/tmp/copilot");
         assert_eq!(value["streaming"], true);
+        assert_eq!(value["includeSubAgentStreamingEvents"], false);
+        assert_eq!(value["defaultAgent"]["excludedTools"][0], "shell");
+        assert_eq!(value["agent"], "code-reviewer");
         assert_eq!(value["skillDirectories"][0], "skills");
         assert_eq!(value["disabledSkills"][0], "legacy_skill");
         assert_eq!(value["requestPermission"], true);
+        assert_eq!(value["gitHubToken"], "token");
+        assert_eq!(value["envValueMode"], "direct");
+        assert_eq!(value["enableConfigDiscovery"], true);
     }
 
     #[test]
@@ -2077,10 +2184,48 @@ mod tests {
     fn test_resume_config_model() {
         let config = ResumeSessionConfig {
             model: Some("gpt-4".into()),
+            client_name: Some("rust-app".into()),
+            system_message: Some(SystemMessageConfig {
+                mode: Some(SystemMessageMode::Append),
+                content: Some("extra context".into()),
+            }),
+            available_tools: Some(vec!["read".into()]),
+            excluded_tools: Some(vec!["write".into()]),
+            include_sub_agent_streaming_events: Some(true),
+            default_agent: Some(DefaultAgentConfig {
+                excluded_tools: Some(vec!["shell".into()]),
+            }),
+            agent: Some("planner".into()),
+            github_token: Some("token".into()),
+            env_value_mode: Some("direct".into()),
+            request_elicitation: Some(true),
+            enable_config_discovery: Some(false),
             ..Default::default()
         };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["model"], "gpt-4");
+        assert_eq!(json["clientName"], "rust-app");
+        assert_eq!(json["systemMessage"]["mode"], "append");
+        assert_eq!(json["availableTools"][0], "read");
+        assert_eq!(json["excludedTools"][0], "write");
+        assert_eq!(json["includeSubAgentStreamingEvents"], true);
+        assert_eq!(json["defaultAgent"]["excludedTools"][0], "shell");
+        assert_eq!(json["agent"], "planner");
+        assert_eq!(json["gitHubToken"], "token");
+        assert_eq!(json["envValueMode"], "direct");
+        assert_eq!(json["requestElicitation"], true);
+        assert_eq!(json["enableConfigDiscovery"], false);
+    }
+
+    #[test]
+    fn test_message_options_request_headers() {
+        let options = MessageOptions {
+            prompt: "hello".into(),
+            request_headers: Some(HashMap::from([("x-test".into(), "1".into())])),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&options).unwrap();
+        assert_eq!(json["requestHeaders"]["x-test"], "1");
     }
 
     #[test]

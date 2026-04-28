@@ -13,8 +13,9 @@ use crate::session::Session;
 use crate::types::{
     ClientOptions, ConnectionState, GetAuthStatusResponse, GetForegroundSessionResponse,
     GetStatusResponse, LogLevel, ModelInfo, PermissionRequestResult, PingResponse, ProviderConfig,
-    ResumeSessionConfig, SessionConfig, SessionLifecycleEvent, SessionMetadata,
-    SetForegroundSessionResponse, StopError, MIN_PROTOCOL_VERSION, SDK_PROTOCOL_VERSION,
+    ResumeSessionConfig, SessionCapabilities, SessionConfig, SessionLifecycleEvent,
+    SessionMetadata, SetForegroundSessionResponse, StopError, MIN_PROTOCOL_VERSION,
+    SDK_PROTOCOL_VERSION,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -721,6 +722,10 @@ impl Client {
         if config.auto_byok_from_env && config.provider.is_none() {
             config.provider = ProviderConfig::from_env();
         }
+        config
+            .include_sub_agent_streaming_events
+            .get_or_insert(true);
+        config.env_value_mode.get_or_insert_with(|| "direct".into());
 
         // Build the request
         let params = serde_json::to_value(&config)?;
@@ -745,6 +750,15 @@ impl Client {
         let session = self
             .create_session_object(session_id.clone(), workspace_path)
             .await;
+        let capabilities = result
+            .get("capabilities")
+            .cloned()
+            .map(serde_json::from_value::<SessionCapabilities>)
+            .transpose()
+            .map_err(|e| {
+                CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
+            })?;
+        session.set_capabilities(capabilities).await;
 
         // Register hooks from config if provided
         if let Some(hooks) = config.hooks.take() {
@@ -774,6 +788,10 @@ impl Client {
         if config.auto_byok_from_env && config.provider.is_none() {
             config.provider = ProviderConfig::from_env();
         }
+        config
+            .include_sub_agent_streaming_events
+            .get_or_insert(true);
+        config.env_value_mode.get_or_insert_with(|| "direct".into());
 
         // Build the request
         let mut params = serde_json::to_value(&config)?;
@@ -799,6 +817,15 @@ impl Client {
         let session = self
             .create_session_object(resumed_id.clone(), workspace_path)
             .await;
+        let capabilities = result
+            .get("capabilities")
+            .cloned()
+            .map(serde_json::from_value::<SessionCapabilities>)
+            .transpose()
+            .map_err(|e| {
+                CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
+            })?;
+        session.set_capabilities(capabilities).await;
 
         // Register hooks from config if provided
         if let Some(hooks) = config.hooks.take() {
@@ -1164,6 +1191,13 @@ impl Client {
         // Wire use_logged_in_user: when false, pass --no-auto-login
         if let Some(false) = self.options.use_logged_in_user {
             args.push("--no-auto-login".to_string());
+        }
+
+        if let Some(timeout) = self.options.session_idle_timeout_seconds {
+            if timeout > 0 {
+                args.push("--session-idle-timeout".to_string());
+                args.push(timeout.to_string());
+            }
         }
 
         // Resolve command and arguments based on platform
@@ -1567,6 +1601,14 @@ impl ClientBuilder {
     /// ```
     pub fn allow_all_tools(mut self, allow: bool) -> Self {
         self.options.allow_all_tools = allow;
+        self
+    }
+
+    /// Set the server-wide idle timeout for sessions, in seconds.
+    ///
+    /// Use `None` or `0` to disable runtime idle cleanup.
+    pub fn session_idle_timeout_seconds(mut self, seconds: u64) -> Self {
+        self.options.session_idle_timeout_seconds = Some(seconds);
         self
     }
 

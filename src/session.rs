@@ -11,8 +11,9 @@ use crate::types::{
     CommandContext, CommandDefinition, CommandResult, ElicitationContext, ElicitationHandler,
     ElicitationParams, ElicitationResult, ErrorOccurredHookInput, MessageOptions,
     PermissionRequest, PermissionRequestResult, PostToolUseHookInput, PreToolUseHookInput,
-    SessionEndHookInput, SessionHooks, SessionStartHookInput, Tool, ToolResultObject,
-    UserInputInvocation, UserInputRequest, UserInputResponse, UserPromptSubmittedHookInput,
+    SessionCapabilities, SessionEndHookInput, SessionHooks, SessionStartHookInput,
+    SessionUiCapabilities, Tool, ToolResultObject, UserInputInvocation, UserInputRequest,
+    UserInputResponse, UserPromptSubmittedHookInput,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -143,6 +144,8 @@ pub struct Session {
     state: Arc<RwLock<SessionState>>,
     /// JSON-RPC invoke function (injected by Client).
     invoke_fn: Arc<InvokeFn>,
+    /// Capabilities reported by the runtime for this session.
+    capabilities: Arc<RwLock<Option<SessionCapabilities>>>,
 }
 
 impl Session {
@@ -170,6 +173,7 @@ impl Session {
                 elicitation_handler: None,
             })),
             invoke_fn: Arc::new(invoke_fn),
+            capabilities: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -188,6 +192,23 @@ impl Session {
     /// Returns None if infinite sessions are disabled.
     pub fn workspace_path(&self) -> Option<&str> {
         self.workspace_path.as_deref()
+    }
+
+    /// Get capabilities reported by the runtime for this session.
+    pub async fn capabilities(&self) -> Option<SessionCapabilities> {
+        self.capabilities.read().await.clone()
+    }
+
+    /// Get UI capabilities reported by the runtime for this session.
+    pub async fn ui_capabilities(&self) -> Option<SessionUiCapabilities> {
+        self.capabilities()
+            .await
+            .map(|capabilities| capabilities.ui)
+    }
+
+    /// Update capabilities after create/resume responses.
+    pub(crate) async fn set_capabilities(&self, capabilities: Option<SessionCapabilities>) {
+        *self.capabilities.write().await = capabilities;
     }
 
     // =========================================================================
@@ -239,6 +260,10 @@ impl Session {
         // Handle broadcast request events (protocol v3) before dispatching to user handlers.
         // Fire-and-forget: the response is sent asynchronously via RPC.
         self.handle_broadcast_event(&event).await;
+
+        if let SessionEventData::CapabilitiesChanged(data) = &event.data {
+            self.update_capabilities(data).await;
+        }
 
         // Send to broadcast channel
         let _ = self.event_tx.send(event.clone());
@@ -383,6 +408,22 @@ impl Session {
             }
             _ => {} // Not a broadcast request event
         }
+    }
+
+    async fn update_capabilities(&self, data: &crate::events::CapabilitiesChangedData) {
+        let mut capabilities = self.capabilities.write().await;
+        let mut next = capabilities.clone().unwrap_or_default();
+
+        if let Some(ui) = &data.ui {
+            if let Some(elicitation) = ui.elicitation {
+                next.ui.elicitation = elicitation;
+            }
+            if let Some(commands) = ui.commands {
+                next.ui.commands = commands;
+            }
+        }
+
+        *capabilities = Some(next);
     }
 
     // =========================================================================
@@ -1175,6 +1216,52 @@ mod tests {
             mock_invoke,
         );
         assert_eq!(session.workspace_path(), Some("/tmp/workspace"));
+    }
+
+    #[tokio::test]
+    async fn test_session_capabilities_accessors() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+        assert!(session.capabilities().await.is_none());
+        assert!(session.ui_capabilities().await.is_none());
+
+        session
+            .set_capabilities(Some(SessionCapabilities {
+                ui: SessionUiCapabilities {
+                    elicitation: true,
+                    commands: true,
+                },
+            }))
+            .await;
+
+        let capabilities = session.capabilities().await.unwrap();
+        assert!(capabilities.ui.elicitation);
+        assert!(capabilities.ui.commands);
+
+        let ui = session.ui_capabilities().await.unwrap();
+        assert!(ui.elicitation);
+        assert!(ui.commands);
+    }
+
+    #[tokio::test]
+    async fn test_capabilities_changed_event_updates_session_capabilities() {
+        let session = Session::new("test".to_string(), None, mock_invoke);
+        let event = SessionEvent::from_json(&serde_json::json!({
+            "id": "evt-capabilities",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "type": "capabilities.changed",
+            "data": {
+                "ui": {
+                    "elicitation": true
+                }
+            }
+        }))
+        .unwrap();
+
+        session.dispatch_event(event).await;
+
+        let ui = session.ui_capabilities().await.unwrap();
+        assert!(ui.elicitation);
+        assert!(!ui.commands);
     }
 
     #[tokio::test]

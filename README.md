@@ -124,6 +124,25 @@ Change the model used by a session at runtime:
 session.set_model("gpt-4o", None, None).await?;
 ```
 
+### Python SDK Parity Options
+
+Session creation and resume support the same wire options as the Python SDK, including
+client names, model capability overrides, per-session GitHub tokens, default-agent
+configuration, agent selection, config discovery, sub-agent streaming controls, and
+per-message request headers:
+
+```rust
+let config = SessionConfig {
+    client_name: Some("my-app".into()),
+    include_sub_agent_streaming_events: Some(true),
+    agent: Some("code-reviewer".into()),
+    enable_config_discovery: Some(true),
+    ..Default::default()
+};
+
+let capabilities = session.capabilities().await;
+```
+
 ### System Prompt Section Overrides
 
 Customize system prompt sections:
