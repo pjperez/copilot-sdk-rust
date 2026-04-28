@@ -606,6 +606,24 @@ pub struct ElicitationResponseData {
     pub value: Option<serde_json::Value>,
 }
 
+/// Data for `capabilities.changed` event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilitiesChangedData {
+    #[serde(default)]
+    pub ui: Option<CapabilitiesChangedUi>,
+}
+
+/// UI capability changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilitiesChangedUi {
+    #[serde(default)]
+    pub elicitation: Option<bool>,
+    #[serde(default)]
+    pub commands: Option<bool>,
+}
+
 /// Data for `external_tool.requested` event (protocol v3 broadcast model).
 ///
 /// In protocol v3, tool calls are broadcast as session events instead of
@@ -688,6 +706,8 @@ pub enum SessionEventData {
     ElicitationRequest(ElicitationRequestData),
     /// Elicitation response.
     ElicitationResponse(ElicitationResponseData),
+    /// Session capabilities changed.
+    CapabilitiesChanged(CapabilitiesChangedData),
     /// External tool requested (protocol v3 broadcast).
     ExternalToolRequested(ExternalToolRequestedData),
     /// Permission requested (protocol v3 broadcast).
@@ -953,6 +973,9 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "elicitation.response" => serde_json::from_value(data)
             .map(SessionEventData::ElicitationResponse)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "capabilities.changed" => serde_json::from_value(data)
+            .map(SessionEventData::CapabilitiesChanged)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "external_tool.requested" => serde_json::from_value(data)
             .map(SessionEventData::ExternalToolRequested)
