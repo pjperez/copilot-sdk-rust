@@ -355,12 +355,28 @@ impl Session {
 
                 let result = self.handle_permission_request(&request).await;
 
-                let mut perm_result_inner = serde_json::json!({
-                    "kind": result.kind,
-                });
-                if let Some(rules) = &result.rules {
-                    perm_result_inner["rules"] = serde_json::json!(rules);
-                }
+                // Map v3 internal kinds to the legacy "PermissionDecision" shape
+                // expected by `session.permissions.handlePendingPermissionRequest`
+                // in CLI 1.0.39+. The CLI's zod schema (TEs / PermissionDecision)
+                // accepts only: approve-once, approve-for-session,
+                // approve-for-location, reject, user-not-available. Sending the
+                // older `{kind:"approved"}` shape causes the CLI to throw
+                // `unexpected user permission response` from its `eve()`
+                // dispatcher when the permission flows through the v2 cme/Oye
+                // service that 1.0.39 wires up via `ensurePermissionService()`.
+                let perm_result_inner = match result.kind.as_str() {
+                    "approved" => serde_json::json!({ "kind": "approve-once" }),
+                    "denied-no-approval-rule-and-could-not-request-from-user" => {
+                        serde_json::json!({ "kind": "user-not-available" })
+                    }
+                    "denied-interactively-by-user" => {
+                        serde_json::json!({ "kind": "reject" })
+                    }
+                    other if other.starts_with("denied") => {
+                        serde_json::json!({ "kind": "reject" })
+                    }
+                    _ => serde_json::json!({ "kind": "reject" }),
+                };
                 let perm_result = serde_json::json!({
                     "sessionId": session_id,
                     "requestId": request_id,
