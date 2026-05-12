@@ -72,6 +72,9 @@ async fn main() -> copilot_sdk::Result<()> {
     // Execute help command directly
     let ctx = CommandContext {
         session_id: session.session_id().to_string(),
+        command: Some("/help".to_string()),
+        command_name: Some("help".to_string()),
+        args: None,
         arguments: None,
         raw_input: Some("/help".to_string()),
     };

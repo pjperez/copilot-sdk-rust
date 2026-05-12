@@ -126,6 +126,7 @@ async fn main() -> copilot_sdk::Result<()> {
                  Keep it concise."
                     .to_string(),
             ),
+            sections: None,
         }),
         ..Default::default()
     };

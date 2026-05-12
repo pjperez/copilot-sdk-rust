@@ -26,6 +26,10 @@ async fn main() -> copilot_sdk::Result<()> {
         bearer_token: None,
         azure: None,
         headers: None,
+        model_id: None,
+        wire_model: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
     };
 
     // Azure provider config (example)
@@ -39,6 +43,10 @@ async fn main() -> copilot_sdk::Result<()> {
             api_version: Some("2024-02-15-preview".to_string()),
         }),
         headers: None,
+        model_id: None,
+        wire_model: None,
+        max_input_tokens: None,
+        max_output_tokens: None,
     };
 
     let config = SessionConfig {

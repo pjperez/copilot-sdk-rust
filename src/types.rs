@@ -44,6 +44,12 @@ pub enum ConnectionState {
 pub enum SystemMessageMode {
     Append,
     Replace,
+    /// Customize individual sections of the SDK-managed prompt.
+    ///
+    /// When this mode is selected, [`SystemMessageConfig::sections`] (or
+    /// [`SessionConfig::section_overrides`]) is consulted to build the wire
+    /// payload.
+    Customize,
 }
 
 /// Attachment type for user messages.
@@ -280,6 +286,24 @@ pub struct SystemMessageConfig {
     pub mode: Option<SystemMessageMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Customize-mode section overrides (wire-format dictionary keyed by
+    /// section id). When [`SessionConfig::section_overrides`] is populated,
+    /// the client lowers it into this field automatically before sending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sections: Option<HashMap<String, WireSectionOverride>>,
+}
+
+/// Wire-format section override for the customize-mode system message.
+///
+/// `action` is one of `"replace"`, `"remove"`, `"append"`, `"prepend"`, or
+/// `"transform"`. When `"transform"` is sent, the runtime calls back via the
+/// `systemMessage.transform` RPC and the SDK invokes the registered callback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireSectionOverride {
+    pub action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// Azure-specific provider options.
@@ -307,6 +331,20 @@ pub struct ProviderConfig {
     pub azure: Option<AzureOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
+    /// Well-known model name for runtime config lookup. Falls back to
+    /// `SessionConfig.model` when unset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Model name actually sent to the provider's API
+    /// (e.g. an Azure deployment name distinct from the well-known model id).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wire_model: Option<String>,
+    /// Override for the provider's maximum input/prompt tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    /// Override for the provider's maximum output tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u64>,
 }
 
 // Environment variable names for BYOK configuration
@@ -357,6 +395,10 @@ impl ProviderConfig {
             bearer_token: None,
             azure: None,
             headers: None,
+            model_id: None,
+            wire_model: None,
+            max_input_tokens: None,
+            max_output_tokens: None,
         })
     }
 
@@ -1021,9 +1063,36 @@ pub struct SessionConfig {
     #[serde(skip)]
     pub section_overrides: Option<Vec<SectionOverride>>,
 
+    /// Per-session FS provider factory invoked after the session is created.
+    #[serde(skip)]
+    pub create_session_fs_handler: Option<crate::session::CreateSessionFsHandler>,
+
     /// Whether to discover config files such as MCP server configs from the working directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_config_discovery: Option<bool>,
+    /// Additional directories to search for custom instruction files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_directories: Option<Vec<String>>,
+
+    /// Per-session telemetry on/off override. When set, takes precedence over
+    /// the client-level [`TelemetryConfig`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_session_telemetry: Option<bool>,
+
+    /// Whether to opt this session into `exitPlanMode.request` callbacks.
+    /// Mirrors Python's automatic flag-flipping when a handler is registered.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "requestExitPlanMode"
+    )]
+    pub request_exit_plan_mode: Option<bool>,
+
+    /// Whether to opt this session into `autoModeSwitch.request` callbacks.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "requestAutoModeSwitch"
+    )]
+    pub request_auto_mode_switch: Option<bool>,
 }
 
 /// Configuration for resuming an existing session.
@@ -1114,6 +1183,42 @@ pub struct ResumeSessionConfig {
     /// Whether to discover config files such as MCP server configs from the working directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_config_discovery: Option<bool>,
+
+    /// Additional directories to search for custom instruction files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_directories: Option<Vec<String>>,
+
+    /// Per-session telemetry on/off override.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_session_telemetry: Option<bool>,
+
+    /// If true, the runtime resumes any pending tool calls or permission
+    /// prompts that were in-flight when the original session was suspended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continue_pending_work: Option<bool>,
+
+    /// Whether to opt this session into `exitPlanMode.request` callbacks.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "requestExitPlanMode"
+    )]
+    pub request_exit_plan_mode: Option<bool>,
+
+    /// Whether to opt this session into `autoModeSwitch.request` callbacks.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "requestAutoModeSwitch"
+    )]
+    pub request_auto_mode_switch: Option<bool>,
+
+    /// System prompt section overrides for granular customize-mode prompts.
+    /// Mirrors [`SessionConfig::section_overrides`].
+    #[serde(skip)]
+    pub section_overrides: Option<Vec<SectionOverride>>,
+
+    /// Per-session FS provider factory invoked after the session is resumed.
+    #[serde(skip)]
+    pub create_session_fs_handler: Option<crate::session::CreateSessionFsHandler>,
 }
 
 /// Options for sending a message.
@@ -1205,6 +1310,21 @@ pub struct ClientOptions {
 
     /// Server-wide session idle timeout in seconds. None or 0 disables idle cleanup.
     pub session_idle_timeout_seconds: Option<u64>,
+
+    /// Connection token sent in the `connect` handshake when using TCP transport.
+    ///
+    /// When the SDK spawns the CLI in TCP mode this token is also exported as
+    /// `COPILOT_CONNECTION_TOKEN` to the subprocess. Cannot be combined with
+    /// `use_stdio = true`.
+    pub tcp_connection_token: Option<String>,
+
+    /// Override for the CLI's `COPILOT_HOME` (base directory for session
+    /// state, config, etc.). Defaults to `~/.copilot` when unset.
+    pub copilot_home: Option<String>,
+
+    /// If true, passes `--remote` to enable Mission Control remote session
+    /// integration when the working directory is inside a GitHub repository.
+    pub remote: bool,
 }
 
 impl Default for ClientOptions {
@@ -1227,6 +1347,9 @@ impl Default for ClientOptions {
             allow_all_tools: false,
             telemetry: None,
             session_idle_timeout_seconds: None,
+            tcp_connection_token: None,
+            copilot_home: None,
+            remote: false,
         }
     }
 }
@@ -1236,6 +1359,11 @@ impl Default for ClientOptions {
 // =============================================================================
 
 /// Filter criteria for listing sessions.
+///
+/// The `cwd`, `git_root`, `repository`, and `branch` fields mirror the Python
+/// SDK's filter shape (matching against the session's [`SessionContext`]).
+/// The `status`, `model`, `since`, `before`, and `limit` fields are
+/// Rust-specific extensions.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionListFilter {
@@ -1254,6 +1382,34 @@ pub struct SessionListFilter {
     /// Maximum number of sessions to return.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
+    /// Filter sessions whose `context.cwd` matches the provided path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Filter sessions whose `context.gitRoot` matches the provided path.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "gitRoot")]
+    pub git_root: Option<String>,
+    /// Filter sessions whose `context.repository` matches `owner/repo`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    /// Filter sessions whose `context.branch` matches the provided branch name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
+/// Working-directory and git context attached to a session.
+///
+/// Mirrors Python `SessionContext`. Embedded in [`SessionMetadata`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContext {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "gitRoot")]
+    pub git_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// Metadata about a session.
@@ -1269,6 +1425,9 @@ pub struct SessionMetadata {
     pub summary: Option<String>,
     #[serde(default)]
     pub is_remote: bool,
+    /// Working-directory / git context the session was created in.
+    #[serde(default)]
+    pub context: Option<SessionContext>,
 }
 
 /// Response from a ping request.
@@ -1551,12 +1710,27 @@ pub struct SetForegroundSessionResponse {
 // =============================================================================
 
 /// Context passed to a command handler when a slash command is invoked.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Mirrors the Python SDK's `CommandContext` shape (`session_id`, `command`,
+/// `command_name`, `args`) while keeping the historical `arguments` /
+/// `raw_input` aliases for backward compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandContext {
     pub session_id: String,
+    /// Full command text including the leading `/` (e.g. `/deploy production`).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Command name without the leading `/` (e.g. `deploy`).
+    #[serde(default)]
+    pub command_name: Option<String>,
+    /// Raw argument string after the command name (e.g. `production`).
+    #[serde(default)]
+    pub args: Option<String>,
+    /// Deprecated alias for `args`. Populated identically by the broadcast dispatcher.
     #[serde(default)]
     pub arguments: Option<String>,
+    /// Deprecated alias for `command`. Populated identically by the broadcast dispatcher.
     #[serde(default)]
     pub raw_input: Option<String>,
 }
@@ -1694,6 +1868,150 @@ pub struct ElicitationContext {
 pub type ElicitationHandler = Arc<dyn Fn(&ElicitationContext) -> ElicitationResult + Send + Sync>;
 
 // =============================================================================
+// Exit Plan Mode
+// =============================================================================
+
+/// Request from the runtime asking the SDK whether to exit plan mode and
+/// continue with one of the offered actions.
+///
+/// Mirrors Python `ExitPlanModeRequest`. Wire field names are camelCase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitPlanModeRequest {
+    /// Session that produced the request.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Short summary of what the agent has accomplished so far.
+    #[serde(default)]
+    pub summary: String,
+    /// The full plan markdown, when supplied by the runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_content: Option<String>,
+    /// The set of actions the runtime can take next.
+    #[serde(default)]
+    pub actions: Vec<String>,
+    /// The action the runtime would pick by default.
+    #[serde(default)]
+    pub recommended_action: String,
+}
+
+/// Result returned by an [`ExitPlanModeHandler`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitPlanModeResult {
+    /// Whether the SDK approves the exit (continues with an action).
+    pub approved: bool,
+    /// The action the SDK selected (must be one of `request.actions`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_action: Option<String>,
+    /// Optional free-form feedback shown back to the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
+}
+
+impl Default for ExitPlanModeResult {
+    fn default() -> Self {
+        Self {
+            approved: true,
+            selected_action: None,
+            feedback: None,
+        }
+    }
+}
+
+/// Handler invoked when the runtime sends an `exitPlanMode.request` RPC.
+pub type ExitPlanModeHandler =
+    Arc<dyn Fn(&ExitPlanModeRequest) -> ExitPlanModeResult + Send + Sync>;
+
+// =============================================================================
+// Auto Mode Switch
+// =============================================================================
+
+/// Request from the runtime asking whether to switch into auto mode after
+/// hitting an eligible rate limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoModeSwitchRequest {
+    /// Session that produced the request.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    /// Provider error code that triggered the offer (if known).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Number of seconds the runtime intends to wait before retrying.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<f64>,
+}
+
+/// Possible responses to an [`AutoModeSwitchRequest`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoModeSwitchResponse {
+    /// Switch to auto mode for this turn only.
+    Yes,
+    /// Switch to auto mode for the rest of the session.
+    YesAlways,
+    /// Stay in the current mode.
+    No,
+}
+
+impl AutoModeSwitchResponse {
+    /// Return the wire string used in `autoModeSwitch.request` responses.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Yes => "yes",
+            Self::YesAlways => "yes_always",
+            Self::No => "no",
+        }
+    }
+}
+
+/// Handler invoked when the runtime sends an `autoModeSwitch.request` RPC.
+pub type AutoModeSwitchHandler =
+    Arc<dyn Fn(&AutoModeSwitchRequest) -> AutoModeSwitchResponse + Send + Sync>;
+
+// =============================================================================
+// Outbound UI elicitation (SDK → server)
+// =============================================================================
+
+/// Constraints for [`crate::session::Session::ui`]'s `input` convenience method.
+///
+/// Mirrors the Python `InputOptions` TypedDict — every field is optional and
+/// is forwarded into the JSON Schema `properties.value` field.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
+    /// JSON-Schema input format hint (`"email"`, `"uri"`, `"date"`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+/// Response payload returned by the `session.ui.elicitation` RPC.
+///
+/// Distinct from [`ElicitationResult`] (which is the *inbound*
+/// server-to-client elicitation handler reply): the outbound request returns
+/// a `content` map keyed by JSON-Schema property name.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiElicitationResult {
+    /// User action: `"accept"`, `"decline"`, or `"cancel"`.
+    pub action: String,
+    /// Submitted form values (present when `action == "accept"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<HashMap<String, serde_json::Value>>,
+}
+
+// =============================================================================
 // Session Capabilities
 // =============================================================================
 
@@ -1735,6 +2053,24 @@ pub enum SystemPromptSection {
     LastInstructions,
 }
 
+impl SystemPromptSection {
+    /// Wire identifier for this section (snake_case string).
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Tone => "tone",
+            Self::ToolEfficiency => "tool_efficiency",
+            Self::EnvironmentContext => "environment_context",
+            Self::CodeChangeRules => "code_change_rules",
+            Self::Guidelines => "guidelines",
+            Self::Safety => "safety",
+            Self::ToolInstructions => "tool_instructions",
+            Self::CustomInstructions => "custom_instructions",
+            Self::LastInstructions => "last_instructions",
+        }
+    }
+}
+
 /// Action to take when overriding a system prompt section.
 #[derive(Clone)]
 pub enum SectionOverrideAction {
@@ -1774,6 +2110,55 @@ impl std::fmt::Debug for SectionOverrideAction {
             Self::Append(s) => f.debug_tuple("Append").field(s).finish(),
             Self::Prepend(s) => f.debug_tuple("Prepend").field(s).finish(),
             Self::Transform(_) => write!(f, "Transform(fn)"),
+        }
+    }
+}
+
+/// Synchronous transform callback for a section override.
+///
+/// Receives the runtime-rendered section content and returns the new content.
+pub type SectionTransformFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
+impl SectionOverride {
+    /// Lower the override into its wire payload + (optional) transform
+    /// callback. The callback is `None` for static actions.
+    pub fn to_wire(&self) -> (WireSectionOverride, Option<SectionTransformFn>) {
+        match &self.action {
+            SectionOverrideAction::Replace(content) => (
+                WireSectionOverride {
+                    action: "replace".into(),
+                    content: Some(content.clone()),
+                },
+                None,
+            ),
+            SectionOverrideAction::Remove => (
+                WireSectionOverride {
+                    action: "remove".into(),
+                    content: None,
+                },
+                None,
+            ),
+            SectionOverrideAction::Append(content) => (
+                WireSectionOverride {
+                    action: "append".into(),
+                    content: Some(content.clone()),
+                },
+                None,
+            ),
+            SectionOverrideAction::Prepend(content) => (
+                WireSectionOverride {
+                    action: "prepend".into(),
+                    content: Some(content.clone()),
+                },
+                None,
+            ),
+            SectionOverrideAction::Transform(callback) => (
+                WireSectionOverride {
+                    action: "transform".into(),
+                    content: None,
+                },
+                Some(Arc::clone(callback)),
+            ),
         }
     }
 }
@@ -2188,6 +2573,7 @@ mod tests {
             system_message: Some(SystemMessageConfig {
                 mode: Some(SystemMessageMode::Append),
                 content: Some("extra context".into()),
+                sections: None,
             }),
             available_tools: Some(vec!["read".into()]),
             excluded_tools: Some(vec!["write".into()]),

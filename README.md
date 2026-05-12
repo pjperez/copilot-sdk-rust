@@ -128,8 +128,10 @@ session.set_model("gpt-4o", None, None).await?;
 
 Session creation and resume support the same wire options as the Python SDK, including
 client names, model capability overrides, per-session GitHub tokens, default-agent
-configuration, agent selection, config discovery, sub-agent streaming controls, and
-per-message request headers:
+configuration, agent selection, config discovery, sub-agent streaming controls,
+per-message request headers, additional instruction directories, per-session telemetry,
+`continuePendingWork` on resume, and the new exit-plan-mode / auto-mode-switch opt-in
+flags:
 
 ```rust
 let config = SessionConfig {
@@ -137,11 +139,107 @@ let config = SessionConfig {
     include_sub_agent_streaming_events: Some(true),
     agent: Some("code-reviewer".into()),
     enable_config_discovery: Some(true),
+    instruction_directories: Some(vec!["./prompts".into()]),
+    enable_session_telemetry: Some(false),
+    request_exit_plan_mode: Some(true),
+    request_auto_mode_switch: Some(true),
     ..Default::default()
 };
 
 let capabilities = session.capabilities().await;
 ```
+
+### Interactive UI Dialogs (`session.ui`)
+
+Drive `confirm` / `select` / `input` / raw `elicitation` dialogs back to the CLI host:
+
+```rust
+let ui = session.ui();
+if ui.confirm("Apply these changes?").await? {
+    let env = ui.select("Pick environment", &["staging", "prod"]).await?;
+    println!("deploying to {env:?}");
+}
+```
+
+### Exit Plan Mode & Auto Mode Switch
+
+Register handlers that the runtime can call when the agent wants to leave plan mode or
+switch into auto mode after a rate limit:
+
+```rust
+session.register_exit_plan_mode_handler(Arc::new(|req| ExitPlanModeResult {
+    approved: true,
+    selected_action: Some(req.recommended_action.clone()),
+    feedback: None,
+})).await;
+
+session.register_auto_mode_switch_handler(Arc::new(|_req| {
+    AutoModeSwitchResponse::YesAlways
+})).await;
+```
+
+### Slash Command Broadcast Dispatch
+
+Slash commands registered via `Session::register_command` (or the
+`SessionConfig.commands` field) are now invoked automatically when the runtime
+broadcasts a `command.execute` event; the SDK responds via
+`session.commands.handlePendingCommand` with the handler result.
+
+### System Message Customize Mode
+
+`SystemMessageMode::Customize` plus `SectionOverride { section, action }` lets you
+replace, remove, append, prepend, or transform individual sections of the SDK-managed
+prompt. `SectionOverrideAction::Transform(Arc<dyn Fn>)` callbacks are dispatched via the
+runtime's `systemMessage.transform` RPC:
+
+```rust
+let config = SessionConfig {
+    section_overrides: Some(vec![
+        SectionOverride {
+            section: SystemPromptSection::Tone,
+            action: SectionOverrideAction::Replace("Be concise and technical.".into()),
+        },
+        SectionOverride {
+            section: SystemPromptSection::Identity,
+            action: SectionOverrideAction::Transform(Arc::new(|content| {
+                format!("{content}\nAlso speak like a pirate.")
+            })),
+        },
+    ]),
+    ..Default::default()
+};
+```
+
+### Server-Side Filesystem Provider (`SessionFsProvider`)
+
+Implement [`SessionFsProvider`] to host a custom session-state filesystem that the
+runtime calls back into. Wire it via `SessionConfig::create_session_fs_handler`:
+
+```rust
+let factory = CreateSessionFsHandler::new(|_session_id| -> SharedSessionFsProvider {
+    Arc::new(MyFsBackend::new())
+});
+
+let session = client.create_session(SessionConfig {
+    create_session_fs_handler: Some(factory),
+    ..Default::default()
+}).await?;
+```
+
+### Connect Handshake & TCP Connection Token
+
+The client now sends the `connect` RPC during startup (with the optional
+`tcp_connection_token` for TCP transports) and falls back to `ping` for legacy v2 servers.
+TCP connection tokens are also exported as `COPILOT_CONNECTION_TOKEN` to spawned CLI
+subprocesses; `copilot_home` and `remote` (Mission Control) are exposed on
+[`ClientOptions`] / [`ClientBuilder`].
+
+### Session List Filters & Metadata Context
+
+[`SessionListFilter`] now mirrors the Python SDK's `cwd` / `git_root` / `repository` /
+`branch` filter fields (in addition to the Rust-only `status` / `model` / `since` /
+`before` / `limit`). [`SessionMetadata`] carries an optional `context: SessionContext`
+with the working-directory and git context the session was created in.
 
 ### System Prompt Section Overrides
 
@@ -227,6 +325,9 @@ cargo run --example fluent_tools        # Builder-pattern tools
 cargo run --example streaming           # Streaming events
 cargo run --example commands            # Slash commands
 cargo run --example elicitation         # Interactive UI dialogs
+cargo run --example session_ui          # confirm/select/input via session.ui
+cargo run --example exit_plan_mode      # exitPlanMode + autoModeSwitch handlers
+cargo run --example session_fs_provider # In-memory SessionFsProvider
 cargo run --example blob_attachments    # Inline data attachments
 cargo run --example set_model           # Runtime model switching
 cargo run --example hooks               # Lifecycle hooks
