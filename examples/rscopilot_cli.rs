@@ -74,6 +74,7 @@ async fn create_session(
                     "You are a helpful Copilot agent. Keep replies concise and actionable."
                         .to_string(),
                 ),
+                sections: None,
             }),
             ..Default::default()
         })

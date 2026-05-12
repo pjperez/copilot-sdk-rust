@@ -23,6 +23,7 @@ async fn main() -> copilot_sdk::Result<()> {
                 "You are a friendly pirate. Respond in pirate dialect using 'Ahoy!', 'Arr!', etc. Keep responses brief."
                     .to_string(),
             ),
+            sections: None,
         }),
         ..Default::default()
     };
@@ -54,6 +55,7 @@ async fn main() -> copilot_sdk::Result<()> {
         system_message: Some(SystemMessageConfig {
             mode: Some(SystemMessageMode::Append),
             content: Some("Always end responses with a relevant emoji.".to_string()),
+            sections: None,
         }),
         ..Default::default()
     };

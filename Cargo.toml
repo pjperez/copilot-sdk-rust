@@ -40,6 +40,7 @@ tracing = "0.1"
 which = "7"
 
 schemars = { version = "0.8", optional = true, features = ["derive"] }
+async-trait = "0.1.89"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -121,3 +122,15 @@ path = "examples/escape_room.rs"
 [[example]]
 name = "rscopilot-cli"
 path = "examples/rscopilot_cli.rs"
+
+[[example]]
+name = "session_ui"
+path = "examples/session_ui.rs"
+
+[[example]]
+name = "exit_plan_mode"
+path = "examples/exit_plan_mode.rs"
+
+[[example]]
+name = "session_fs_provider"
+path = "examples/session_fs_provider.rs"

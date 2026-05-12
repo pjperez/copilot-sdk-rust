@@ -7,13 +7,16 @@
 
 use crate::error::{CopilotError, Result};
 use crate::events::{SessionEvent, SessionEventData};
+use crate::session_fs::{SessionFsError, SessionFsErrorCode, SharedSessionFsProvider};
 use crate::types::{
-    CommandContext, CommandDefinition, CommandResult, ElicitationContext, ElicitationHandler,
-    ElicitationParams, ElicitationResult, ErrorOccurredHookInput, MessageOptions,
-    PermissionRequest, PermissionRequestResult, PostToolUseHookInput, PreToolUseHookInput,
-    SessionCapabilities, SessionEndHookInput, SessionHooks, SessionStartHookInput,
-    SessionUiCapabilities, Tool, ToolResultObject, UserInputInvocation, UserInputRequest,
-    UserInputResponse, UserPromptSubmittedHookInput,
+    AutoModeSwitchHandler, AutoModeSwitchRequest, AutoModeSwitchResponse, CommandContext,
+    CommandDefinition, CommandResult, ElicitationContext, ElicitationHandler, ElicitationParams,
+    ElicitationResult, ErrorOccurredHookInput, ExitPlanModeHandler, ExitPlanModeRequest,
+    ExitPlanModeResult, MessageOptions, PermissionRequest, PermissionRequestResult,
+    PostToolUseHookInput, PreToolUseHookInput, SectionTransformFn, SessionCapabilities,
+    SessionEndHookInput, SessionHooks, SessionStartHookInput, SessionUiCapabilities, Tool,
+    ToolResultObject, UserInputInvocation, UserInputRequest, UserInputResponse,
+    UserPromptSubmittedHookInput,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -44,6 +47,45 @@ pub type UserInputHandler =
 pub type InvokeFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>;
 
 type InvokeFn = dyn Fn(&str, Option<Value>) -> InvokeFuture + Send + Sync;
+
+/// Factory that produces a per-session FS provider.
+///
+/// Mirrors Python's `CreateSessionFsHandler`. Receives the session id and
+/// returns a fresh [`SharedSessionFsProvider`]; the SDK invokes the factory
+/// after `session.create` / `session.resume` succeeds.
+#[derive(Clone)]
+pub struct CreateSessionFsHandler(Arc<dyn Fn(&str) -> SharedSessionFsProvider + Send + Sync>);
+
+impl CreateSessionFsHandler {
+    /// Wrap a closure into a `CreateSessionFsHandler`.
+    pub fn new<F>(factory: F) -> Self
+    where
+        F: Fn(&str) -> SharedSessionFsProvider + Send + Sync + 'static,
+    {
+        Self(Arc::new(factory))
+    }
+
+    /// Invoke the factory for the given session id.
+    pub fn call(&self, session_id: &str) -> SharedSessionFsProvider {
+        (self.0)(session_id)
+    }
+}
+
+impl std::fmt::Debug for CreateSessionFsHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CreateSessionFsHandler(fn)")
+    }
+}
+
+fn err_to_json(err: &SessionFsError) -> Value {
+    serde_json::json!({
+        "code": match err.code {
+            SessionFsErrorCode::NoEnt => "ENOENT",
+            SessionFsErrorCode::Unknown => "UNKNOWN",
+        },
+        "message": err.message,
+    })
+}
 
 // =============================================================================
 // Event Subscription
@@ -98,6 +140,14 @@ struct SessionState {
     commands: HashMap<String, CommandDefinition>,
     /// Elicitation handler.
     elicitation_handler: Option<ElicitationHandler>,
+    /// Exit-plan-mode handler.
+    exit_plan_mode_handler: Option<ExitPlanModeHandler>,
+    /// Auto-mode-switch handler.
+    auto_mode_switch_handler: Option<AutoModeSwitchHandler>,
+    /// Section-id → transform callback for the customize-mode system message.
+    transform_callbacks: HashMap<String, SectionTransformFn>,
+    /// Optional inbound session-FS provider supplied by the host.
+    session_fs_provider: Option<SharedSessionFsProvider>,
 }
 
 /// A Copilot conversation session.
@@ -171,6 +221,10 @@ impl Session {
                 next_handler_id: AtomicU64::new(1),
                 commands: HashMap::new(),
                 elicitation_handler: None,
+                exit_plan_mode_handler: None,
+                auto_mode_switch_handler: None,
+                transform_callbacks: HashMap::new(),
+                session_fs_provider: None,
             })),
             invoke_fn: Arc::new(invoke_fn),
             capabilities: Arc::new(RwLock::new(None)),
@@ -400,6 +454,62 @@ impl Session {
                 {
                     tracing::warn!(
                         "Failed to respond to permission request {} for session {}: {}",
+                        request_id,
+                        session_id,
+                        err
+                    );
+                }
+            }
+            SessionEventData::CommandExecute(data) => {
+                let request_id = match &data.request_id {
+                    Some(id) => id.clone(),
+                    None => return,
+                };
+                let command_name = match &data.command_name {
+                    Some(name) => name.clone(),
+                    None => return,
+                };
+
+                // Only respond if this client has registered the command;
+                // otherwise another client may handle it.
+                if self.get_command(&command_name).await.is_none() {
+                    return;
+                }
+
+                let command = data.command.clone();
+                let args = data.args.clone();
+                let session_id = self.session_id.clone();
+
+                let context = CommandContext {
+                    session_id: session_id.clone(),
+                    command: command.clone(),
+                    command_name: Some(command_name.clone()),
+                    args: args.clone(),
+                    arguments: args,
+                    raw_input: command,
+                };
+
+                let response_params =
+                    match self.handle_command_execute(&command_name, &context).await {
+                        Ok(_) => serde_json::json!({
+                            "sessionId": session_id,
+                            "requestId": request_id,
+                        }),
+                        Err(err) => serde_json::json!({
+                            "sessionId": session_id,
+                            "requestId": request_id,
+                            "error": err.to_string(),
+                        }),
+                    };
+
+                if let Err(err) = (self.invoke_fn)(
+                    "session.commands.handlePendingCommand",
+                    Some(response_params),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        "Failed to respond to command request {} for session {}: {}",
                         request_id,
                         session_id,
                         err
@@ -699,6 +809,277 @@ impl Session {
             Err(CopilotError::Protocol(
                 "No elicitation handler registered".into(),
             ))
+        }
+    }
+
+    // =========================================================================
+    // Exit Plan Mode
+    // =========================================================================
+
+    /// Register a handler for `exitPlanMode.request` callbacks.
+    ///
+    /// Set [`crate::types::SessionConfig::request_exit_plan_mode`] to
+    /// `Some(true)` so the runtime knows to dispatch them to this client.
+    pub async fn register_exit_plan_mode_handler(&self, handler: ExitPlanModeHandler) {
+        let mut state = self.state.write().await;
+        state.exit_plan_mode_handler = Some(handler);
+    }
+
+    /// Whether an exit-plan-mode handler is registered.
+    pub async fn has_exit_plan_mode_handler(&self) -> bool {
+        let state = self.state.read().await;
+        state.exit_plan_mode_handler.is_some()
+    }
+
+    /// Dispatch an `exitPlanMode.request` to the registered handler.
+    ///
+    /// Returns the default `{ approved: true }` result when no handler is
+    /// registered, mirroring the Python SDK.
+    pub async fn handle_exit_plan_mode_request(
+        &self,
+        request: &ExitPlanModeRequest,
+    ) -> ExitPlanModeResult {
+        let state = self.state.read().await;
+        match &state.exit_plan_mode_handler {
+            Some(handler) => handler(request),
+            None => ExitPlanModeResult::default(),
+        }
+    }
+
+    // =========================================================================
+    // Auto Mode Switch
+    // =========================================================================
+
+    /// Register a handler for `autoModeSwitch.request` callbacks.
+    ///
+    /// Set [`crate::types::SessionConfig::request_auto_mode_switch`] to
+    /// `Some(true)` so the runtime knows to dispatch them to this client.
+    pub async fn register_auto_mode_switch_handler(&self, handler: AutoModeSwitchHandler) {
+        let mut state = self.state.write().await;
+        state.auto_mode_switch_handler = Some(handler);
+    }
+
+    /// Whether an auto-mode-switch handler is registered.
+    pub async fn has_auto_mode_switch_handler(&self) -> bool {
+        let state = self.state.read().await;
+        state.auto_mode_switch_handler.is_some()
+    }
+
+    /// Dispatch an `autoModeSwitch.request` to the registered handler.
+    ///
+    /// Returns [`AutoModeSwitchResponse::No`] when no handler is registered,
+    /// mirroring the Python SDK default.
+    pub async fn handle_auto_mode_switch_request(
+        &self,
+        request: &AutoModeSwitchRequest,
+    ) -> AutoModeSwitchResponse {
+        let state = self.state.read().await;
+        match &state.auto_mode_switch_handler {
+            Some(handler) => handler(request),
+            None => AutoModeSwitchResponse::No,
+        }
+    }
+
+    // =========================================================================
+    // System Message Transform
+    // =========================================================================
+
+    /// Register the per-section transform callbacks for the customize-mode
+    /// system message. Replaces any previously stored callbacks.
+    pub async fn register_transform_callbacks(
+        &self,
+        callbacks: HashMap<String, SectionTransformFn>,
+    ) {
+        let mut state = self.state.write().await;
+        state.transform_callbacks = callbacks;
+    }
+
+    /// Whether at least one section transform callback is registered.
+    pub async fn has_transform_callbacks(&self) -> bool {
+        let state = self.state.read().await;
+        !state.transform_callbacks.is_empty()
+    }
+
+    /// Handle a `systemMessage.transform` callback from the runtime.
+    ///
+    /// The runtime sends `{ sectionId: { content: "..." }, ... }`; this method
+    /// invokes the registered callback for each section and returns
+    /// `{ sections: { sectionId: { content: "transformed" } } }`. Sections
+    /// without a callback are echoed back unchanged.
+    pub async fn handle_system_message_transform(&self, sections: &Value) -> Value {
+        let state = self.state.read().await;
+        let callbacks = &state.transform_callbacks;
+
+        let mut result = serde_json::Map::new();
+        if let Some(obj) = sections.as_object() {
+            for (section_id, section_data) in obj {
+                let content = section_data
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let new_content = match callbacks.get(section_id) {
+                    Some(callback) => callback(&content),
+                    None => content,
+                };
+                let mut entry = serde_json::Map::new();
+                entry.insert("content".into(), Value::String(new_content));
+                result.insert(section_id.clone(), Value::Object(entry));
+            }
+        }
+        serde_json::json!({ "sections": Value::Object(result) })
+    }
+
+    // =========================================================================
+    // Session FS Provider (inbound)
+    // =========================================================================
+
+    /// Register an inbound FS provider for this session. The runtime will
+    /// dispatch `sessionFs.*` RPC calls to it.
+    pub async fn register_session_fs_provider(&self, provider: SharedSessionFsProvider) {
+        let mut state = self.state.write().await;
+        state.session_fs_provider = Some(provider);
+    }
+
+    /// Whether an inbound session-FS provider is currently registered.
+    pub async fn has_session_fs_provider(&self) -> bool {
+        let state = self.state.read().await;
+        state.session_fs_provider.is_some()
+    }
+
+    async fn session_fs_provider(&self) -> Option<SharedSessionFsProvider> {
+        let state = self.state.read().await;
+        state.session_fs_provider.clone()
+    }
+
+    /// Dispatch an inbound `sessionFs.*` RPC by method name. Returns the JSON
+    /// response payload.
+    pub async fn handle_session_fs_request(&self, method: &str, params: &Value) -> Result<Value> {
+        let provider = match self.session_fs_provider().await {
+            Some(p) => p,
+            None => {
+                return Err(CopilotError::Protocol(format!(
+                    "No session_fs handler registered for session: {}",
+                    self.session_id
+                )));
+            }
+        };
+
+        let path = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let mode = params
+            .get("mode")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        match method {
+            "sessionFs.readFile" => match provider.read_file(&path).await {
+                Ok(content) => Ok(serde_json::json!({ "content": content })),
+                Err(err) => Ok(serde_json::json!({
+                    "content": "",
+                    "error": err_to_json(&err),
+                })),
+            },
+            "sessionFs.writeFile" => {
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match provider.write_file(&path, &content, mode).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(err) => Ok(err_to_json(&err)),
+                }
+            }
+            "sessionFs.appendFile" => {
+                let content = params
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match provider.append_file(&path, &content, mode).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(err) => Ok(err_to_json(&err)),
+                }
+            }
+            "sessionFs.exists" => match provider.exists(&path).await {
+                Ok(exists) => Ok(serde_json::json!({ "exists": exists })),
+                Err(_) => Ok(serde_json::json!({ "exists": false })),
+            },
+            "sessionFs.stat" => match provider.stat(&path).await {
+                Ok(info) => Ok(serde_json::to_value(info).unwrap_or(Value::Null)),
+                Err(err) => Ok(serde_json::json!({
+                    "isFile": false,
+                    "isDirectory": false,
+                    "size": 0,
+                    "mtime": "",
+                    "birthtime": "",
+                    "error": err_to_json(&err),
+                })),
+            },
+            "sessionFs.mkdir" => {
+                let recursive = params
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match provider.mkdir(&path, recursive, mode).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(err) => Ok(err_to_json(&err)),
+                }
+            }
+            "sessionFs.readdir" => match provider.readdir(&path).await {
+                Ok(entries) => Ok(serde_json::json!({ "entries": entries })),
+                Err(err) => Ok(serde_json::json!({
+                    "entries": [],
+                    "error": err_to_json(&err),
+                })),
+            },
+            "sessionFs.readdirWithTypes" => match provider.readdir_with_types(&path).await {
+                Ok(entries) => Ok(serde_json::json!({
+                    "entries": serde_json::to_value(entries).unwrap_or(Value::Array(vec![])),
+                })),
+                Err(err) => Ok(serde_json::json!({
+                    "entries": [],
+                    "error": err_to_json(&err),
+                })),
+            },
+            "sessionFs.rm" => {
+                let recursive = params
+                    .get("recursive")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let force = params
+                    .get("force")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                match provider.rm(&path, recursive, force).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(err) => Ok(err_to_json(&err)),
+                }
+            }
+            "sessionFs.rename" => {
+                let src = params
+                    .get("src")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let dest = params
+                    .get("dest")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                match provider.rename(&src, &dest).await {
+                    Ok(()) => Ok(Value::Null),
+                    Err(err) => Ok(err_to_json(&err)),
+                }
+            }
+            other => Err(CopilotError::Protocol(format!(
+                "Unknown sessionFs method: {}",
+                other
+            ))),
         }
     }
 
@@ -1174,6 +1555,150 @@ impl Session {
             Err(_) => Err(CopilotError::Timeout(timeout)),
         }
     }
+
+    /// Return a [`SessionUi`] handle for showing interactive dialogs to the
+    /// user via the `session.ui.elicitation` RPC.
+    ///
+    /// Mirrors Python's `session.ui` property. Only useful when the runtime
+    /// has reported `capabilities.ui.elicitation == true`.
+    pub fn ui(self: &Arc<Self>) -> SessionUi {
+        SessionUi {
+            session: Arc::clone(self),
+        }
+    }
+}
+
+// =============================================================================
+// SessionUi (outbound interactive dialogs)
+// =============================================================================
+
+/// Handle to the interactive UI surface of a [`Session`].
+///
+/// Methods drive interactive dialogs back to the CLI host via the
+/// `session.ui.elicitation` JSON-RPC method. Each helper builds the
+/// appropriate JSON Schema internally; use [`SessionUi::elicitation`] for
+/// fully custom forms.
+#[derive(Clone)]
+pub struct SessionUi {
+    session: Arc<Session>,
+}
+
+impl SessionUi {
+    /// Send a raw `session.ui.elicitation` request with a caller-supplied
+    /// JSON Schema and message.
+    ///
+    /// Returns a [`crate::types::UiElicitationResult`] containing the user's
+    /// `action` and (when accepted) submitted `content` map.
+    pub async fn elicitation(
+        &self,
+        message: impl Into<String>,
+        requested_schema: Value,
+    ) -> Result<crate::types::UiElicitationResult> {
+        let params = serde_json::json!({
+            "sessionId": self.session.session_id(),
+            "message": message.into(),
+            "requestedSchema": requested_schema,
+        });
+        let response = (self.session.invoke_fn)("session.ui.elicitation", Some(params)).await?;
+        serde_json::from_value(response)
+            .map_err(|e| CopilotError::Protocol(format!("Invalid ui.elicitation response: {}", e)))
+    }
+
+    /// Show a confirmation dialog. Returns `true` when the user accepts the
+    /// dialog and the `confirmed` field comes back `true`.
+    pub async fn confirm(&self, message: impl Into<String>) -> Result<bool> {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "confirmed": { "type": "boolean", "default": true },
+            },
+            "required": ["confirmed"],
+        });
+        let result = self.elicitation(message, schema).await?;
+        Ok(result.action == "accept"
+            && result
+                .content
+                .as_ref()
+                .and_then(|c| c.get("confirmed"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false))
+    }
+
+    /// Show a select dialog. Returns the chosen option, or `None` if the user
+    /// declined or cancelled.
+    pub async fn select(
+        &self,
+        message: impl Into<String>,
+        options: &[impl AsRef<str>],
+    ) -> Result<Option<String>> {
+        let enum_values: Vec<Value> = options
+            .iter()
+            .map(|o| Value::String(o.as_ref().to_string()))
+            .collect();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "selection": { "type": "string", "enum": enum_values },
+            },
+            "required": ["selection"],
+        });
+        let result = self.elicitation(message, schema).await?;
+        if result.action != "accept" {
+            return Ok(None);
+        }
+        Ok(result
+            .content
+            .as_ref()
+            .and_then(|c| c.get("selection"))
+            .and_then(|v| v.as_str())
+            .map(String::from))
+    }
+
+    /// Show a text-input dialog. Returns the entered text, or `None` if the
+    /// user declined or cancelled.
+    pub async fn input(
+        &self,
+        message: impl Into<String>,
+        options: Option<&crate::types::InputOptions>,
+    ) -> Result<Option<String>> {
+        let mut field = serde_json::Map::new();
+        field.insert("type".into(), Value::String("string".into()));
+        if let Some(opts) = options {
+            if let Some(v) = &opts.title {
+                field.insert("title".into(), Value::String(v.clone()));
+            }
+            if let Some(v) = &opts.description {
+                field.insert("description".into(), Value::String(v.clone()));
+            }
+            if let Some(v) = opts.min_length {
+                field.insert("minLength".into(), Value::from(v));
+            }
+            if let Some(v) = opts.max_length {
+                field.insert("maxLength".into(), Value::from(v));
+            }
+            if let Some(v) = &opts.format {
+                field.insert("format".into(), Value::String(v.clone()));
+            }
+            if let Some(v) = &opts.default {
+                field.insert("default".into(), Value::String(v.clone()));
+            }
+        }
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "value": Value::Object(field) },
+            "required": ["value"],
+        });
+        let result = self.elicitation(message, schema).await?;
+        if result.action != "accept" {
+            return Ok(None);
+        }
+        Ok(result
+            .content
+            .as_ref()
+            .and_then(|c| c.get("value"))
+            .and_then(|v| v.as_str())
+            .map(String::from))
+    }
 }
 
 #[cfg(test)]
@@ -1540,5 +2065,131 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_null());
+    }
+
+    #[tokio::test]
+    async fn test_exit_plan_mode_default_when_unregistered() {
+        let session = Session::new("s".to_string(), None, mock_invoke);
+        let request = crate::types::ExitPlanModeRequest {
+            session_id: Some("s".into()),
+            summary: "done".into(),
+            plan_content: None,
+            actions: vec!["autopilot".into()],
+            recommended_action: "autopilot".into(),
+        };
+        let result = session.handle_exit_plan_mode_request(&request).await;
+        assert!(result.approved);
+    }
+
+    #[tokio::test]
+    async fn test_exit_plan_mode_dispatch() {
+        let session = Session::new("s".to_string(), None, mock_invoke);
+        session
+            .register_exit_plan_mode_handler(Arc::new(|req| crate::types::ExitPlanModeResult {
+                approved: false,
+                selected_action: Some(req.recommended_action.clone()),
+                feedback: Some("not now".into()),
+            }))
+            .await;
+        let request = crate::types::ExitPlanModeRequest {
+            session_id: Some("s".into()),
+            summary: "done".into(),
+            plan_content: None,
+            actions: vec!["autopilot".into(), "manual".into()],
+            recommended_action: "autopilot".into(),
+        };
+        let result = session.handle_exit_plan_mode_request(&request).await;
+        assert!(!result.approved);
+        assert_eq!(result.selected_action.as_deref(), Some("autopilot"));
+    }
+
+    #[tokio::test]
+    async fn test_auto_mode_switch_default_when_unregistered() {
+        let session = Session::new("s".to_string(), None, mock_invoke);
+        let req = crate::types::AutoModeSwitchRequest::default();
+        let resp = session.handle_auto_mode_switch_request(&req).await;
+        assert_eq!(resp, crate::types::AutoModeSwitchResponse::No);
+    }
+
+    #[tokio::test]
+    async fn test_system_message_transform_callback() {
+        let session = Session::new("s".to_string(), None, mock_invoke);
+        let mut callbacks: HashMap<String, crate::types::SectionTransformFn> = HashMap::new();
+        callbacks.insert(
+            "tone".to_string(),
+            Arc::new(|content: &str| format!("{} [transformed]", content)),
+        );
+        session.register_transform_callbacks(callbacks).await;
+
+        let sections = serde_json::json!({
+            "tone": { "content": "be friendly" },
+            "identity": { "content": "you are an agent" },
+        });
+        let response = session.handle_system_message_transform(&sections).await;
+        let out = response.get("sections").unwrap();
+        assert_eq!(
+            out.get("tone").unwrap().get("content").unwrap().as_str(),
+            Some("be friendly [transformed]")
+        );
+        assert_eq!(
+            out.get("identity")
+                .unwrap()
+                .get("content")
+                .unwrap()
+                .as_str(),
+            Some("you are an agent")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_command_context_back_compat_fields() {
+        let ctx = crate::types::CommandContext {
+            session_id: "s".to_string(),
+            command: Some("/help".into()),
+            command_name: Some("help".into()),
+            args: Some("".into()),
+            arguments: Some("".into()),
+            raw_input: Some("/help".into()),
+        };
+        assert_eq!(ctx.command.as_deref(), Some("/help"));
+        assert_eq!(ctx.raw_input.as_deref(), Some("/help"));
+    }
+
+    #[tokio::test]
+    async fn test_section_overrides_lower_to_wire() {
+        let overrides = vec![
+            crate::types::SectionOverride {
+                section: crate::types::SystemPromptSection::Tone,
+                action: crate::types::SectionOverrideAction::Replace("be terse".into()),
+            },
+            crate::types::SectionOverride {
+                section: crate::types::SystemPromptSection::Identity,
+                action: crate::types::SectionOverrideAction::Transform(Arc::new(|s: &str| {
+                    format!("{}!!", s)
+                })),
+            },
+        ];
+
+        let mut wire_count_static = 0;
+        let mut wire_count_transform = 0;
+        for ov in &overrides {
+            let (wire, callback) = ov.to_wire();
+            match wire.action.as_str() {
+                "replace" => {
+                    assert_eq!(wire.content.as_deref(), Some("be terse"));
+                    assert!(callback.is_none());
+                    wire_count_static += 1;
+                }
+                "transform" => {
+                    assert!(wire.content.is_none());
+                    let cb = callback.expect("transform must produce a callback");
+                    assert_eq!(cb("hello"), "hello!!");
+                    wire_count_transform += 1;
+                }
+                other => panic!("unexpected wire action {other}"),
+            }
+        }
+        assert_eq!(wire_count_static, 1);
+        assert_eq!(wire_count_transform, 1);
     }
 }

@@ -578,6 +578,28 @@ pub struct CommandCompleteData {
     pub message: Option<String>,
 }
 
+/// Data for `command.execute` event (protocol v3 broadcast model).
+///
+/// Emitted by the runtime when a user invokes a slash command that the SDK
+/// has registered. The SDK responds via `session.commands.handlePendingCommand`
+/// after dispatching to the registered handler.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandExecuteData {
+    /// Unique request ID for correlating the response.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Command name (without the leading `/`).
+    #[serde(default)]
+    pub command_name: Option<String>,
+    /// Full command text including the leading `/`.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Raw argument string after the command name.
+    #[serde(default)]
+    pub args: Option<String>,
+}
+
 /// Data for `elicitation.request` event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -702,6 +724,8 @@ pub enum SessionEventData {
     CommandStart(CommandStartData),
     /// Command execution completed.
     CommandComplete(CommandCompleteData),
+    /// Slash command requested by the user (protocol v3 broadcast).
+    CommandExecute(CommandExecuteData),
     /// Elicitation request.
     ElicitationRequest(ElicitationRequestData),
     /// Elicitation response.
@@ -967,6 +991,9 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "command.complete" => serde_json::from_value(data)
             .map(SessionEventData::CommandComplete)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "command.execute" => serde_json::from_value(data)
+            .map(SessionEventData::CommandExecute)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "elicitation.request" => serde_json::from_value(data)
             .map(SessionEventData::ElicitationRequest)
