@@ -41,6 +41,7 @@ pub mod events;
 pub mod jsonrpc;
 pub mod process;
 pub mod session;
+pub mod session_fs;
 pub mod tools;
 pub mod transport;
 pub mod types;
@@ -55,6 +56,10 @@ pub use types::{
     session_lifecycle_event_types,
     // Enums
     AttachmentType,
+    // Auto mode switch
+    AutoModeSwitchHandler,
+    AutoModeSwitchRequest,
+    AutoModeSwitchResponse,
     // Config types
     AzureOptions,
     ClientOptions,
@@ -76,6 +81,10 @@ pub use types::{
     ErrorOccurredHandler,
     ErrorOccurredHookInput,
     ErrorOccurredHookOutput,
+    // Exit plan mode
+    ExitPlanModeHandler,
+    ExitPlanModeRequest,
+    ExitPlanModeResult,
     // External server config
     ExternalServerConfig,
     // Response types
@@ -83,6 +92,7 @@ pub use types::{
     GetForegroundSessionResponse,
     GetStatusResponse,
     InfiniteSessionConfig,
+    InputOptions,
     LogLevel,
     McpLocalServerConfig,
     McpRemoteServerConfig,
@@ -117,6 +127,7 @@ pub use types::{
     // System prompt section types
     SectionOverride,
     SectionOverrideAction,
+    SectionTransformFn,
     // Selection types
     SelectionAttachment,
     SelectionPosition,
@@ -124,6 +135,7 @@ pub use types::{
     // Session capabilities
     SessionCapabilities,
     SessionConfig,
+    SessionContext,
     SessionEndHandler,
     SessionEndHookInput,
     SessionEndHookOutput,
@@ -164,6 +176,7 @@ pub use types::{
     ToolResult,
     ToolResultObject,
     ToolResultType,
+    UiElicitationResult,
     // User input types
     UserInputInvocation,
     UserInputRequest,
@@ -172,6 +185,7 @@ pub use types::{
     UserPromptSubmittedHandler,
     UserPromptSubmittedHookInput,
     UserPromptSubmittedHookOutput,
+    WireSectionOverride,
     // Constants
     SDK_PROTOCOL_VERSION,
 };
@@ -191,6 +205,7 @@ pub use events::{
     CapabilitiesChangedData,
     CapabilitiesChangedUi,
     CommandCompleteData,
+    CommandExecuteData,
     CommandStartData,
     CompactionTokensUsed,
     CustomAgentCompletedData,
@@ -254,10 +269,16 @@ pub use process::{
     find_copilot_cli, find_executable, find_node, is_node_script, CopilotProcess, ProcessOptions,
 };
 
+// Re-export session FS provider types
+pub use session_fs::{
+    SessionFsError, SessionFsErrorCode, SessionFsFileInfo, SessionFsProvider,
+    SessionFsProviderEntry, SharedSessionFsProvider,
+};
+
 // Re-export session types
 pub use session::{
-    EventHandler, EventSubscription, InvokeFuture, PermissionHandler, RegisteredTool, Session,
-    ToolHandler, UserInputHandler,
+    CreateSessionFsHandler, EventHandler, EventSubscription, InvokeFuture, PermissionHandler,
+    RegisteredTool, Session, SessionUi, ToolHandler, UserInputHandler,
 };
 
 // Re-export client types

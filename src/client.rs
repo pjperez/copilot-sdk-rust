@@ -357,6 +357,137 @@ async fn handle_hooks_invoke(
     session.handle_hooks_invoke(hook_type, &input).await
 }
 
+/// Handle an `exitPlanMode.request` callback from the CLI server.
+async fn handle_exit_plan_mode_request(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for exitPlanMode.request: {session_id}"
+            )));
+        }
+    };
+
+    let request: crate::types::ExitPlanModeRequest = serde_json::from_value(params.clone())
+        .map_err(|e| CopilotError::Protocol(format!("Invalid exitPlanMode.request: {}", e)))?;
+
+    let result = session.handle_exit_plan_mode_request(&request).await;
+    Ok(serde_json::to_value(result).unwrap_or(json!({"approved": true})))
+}
+
+/// Handle an inbound `sessionFs.*` RPC by routing to the session's provider.
+async fn handle_session_fs_request(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for {method}: {session_id}"
+            )));
+        }
+    };
+
+    session.handle_session_fs_request(method, params).await
+}
+
+/// Handle a `systemMessage.transform` callback from the CLI server.
+async fn handle_system_message_transform(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for systemMessage.transform: {session_id}"
+            )));
+        }
+    };
+
+    let sections = params.get("sections").cloned().unwrap_or(Value::Null);
+    Ok(session.handle_system_message_transform(&sections).await)
+}
+
+/// Lower a `Vec<SectionOverride>` into `system_message.sections` and return
+/// the extracted transform callbacks keyed by section id.
+fn lower_section_overrides(
+    system_message: &mut Option<crate::types::SystemMessageConfig>,
+    overrides: Option<Vec<crate::types::SectionOverride>>,
+) -> HashMap<String, crate::types::SectionTransformFn> {
+    let mut callbacks = HashMap::new();
+    let overrides = match overrides {
+        Some(v) if !v.is_empty() => v,
+        _ => return callbacks,
+    };
+
+    let cfg = system_message.get_or_insert_with(crate::types::SystemMessageConfig::default);
+    if cfg.mode.is_none() {
+        cfg.mode = Some(crate::types::SystemMessageMode::Customize);
+    }
+
+    let map = cfg.sections.get_or_insert_with(HashMap::new);
+    for ov in overrides {
+        let (wire, callback) = ov.to_wire();
+        let key = ov.section.as_wire_str().to_string();
+        if let Some(cb) = callback {
+            callbacks.insert(key.clone(), cb);
+        }
+        map.insert(key, wire);
+    }
+    callbacks
+}
+
+/// Handle an `autoModeSwitch.request` callback from the CLI server.
+async fn handle_auto_mode_switch_request(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) -> Result<Value> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| CopilotError::InvalidConfig("Missing sessionId".into()))?;
+
+    let session = sessions.read().await.get(session_id).cloned();
+    let session = match session {
+        Some(s) => s,
+        None => {
+            return Err(CopilotError::Protocol(format!(
+                "Session not found for autoModeSwitch.request: {session_id}"
+            )));
+        }
+    };
+
+    let request: crate::types::AutoModeSwitchRequest = serde_json::from_value(params.clone())
+        .map_err(|e| CopilotError::Protocol(format!("Invalid autoModeSwitch.request: {}", e)))?;
+
+    let response = session.handle_auto_mode_switch_request(&request).await;
+    Ok(json!({ "response": response.as_wire_str() }))
+}
+
 fn parse_cli_url(url: &str) -> Result<(String, u16)> {
     let mut s = url.trim();
     if let Some((_, rest)) = s.split_once("://") {
@@ -727,6 +858,11 @@ impl Client {
             .get_or_insert(true);
         config.env_value_mode.get_or_insert_with(|| "direct".into());
 
+        // Lower section_overrides into system_message.sections and capture
+        // any transform callbacks for later dispatch via systemMessage.transform.
+        let transform_callbacks =
+            lower_section_overrides(&mut config.system_message, config.section_overrides.take());
+
         // Build the request
         let params = serde_json::to_value(&config)?;
 
@@ -759,6 +895,17 @@ impl Client {
                 CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
             })?;
         session.set_capabilities(capabilities).await;
+
+        if !transform_callbacks.is_empty() {
+            session
+                .register_transform_callbacks(transform_callbacks)
+                .await;
+        }
+
+        if let Some(factory) = config.create_session_fs_handler.take() {
+            let provider = factory.call(&session_id);
+            session.register_session_fs_provider(provider).await;
+        }
 
         // Register hooks from config if provided
         if let Some(hooks) = config.hooks.take() {
@@ -793,6 +940,9 @@ impl Client {
             .get_or_insert(true);
         config.env_value_mode.get_or_insert_with(|| "direct".into());
 
+        let transform_callbacks =
+            lower_section_overrides(&mut config.system_message, config.section_overrides.take());
+
         // Build the request
         let mut params = serde_json::to_value(&config)?;
         params["sessionId"] = json!(session_id);
@@ -826,6 +976,17 @@ impl Client {
                 CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
             })?;
         session.set_capabilities(capabilities).await;
+
+        if !transform_callbacks.is_empty() {
+            session
+                .register_transform_callbacks(transform_callbacks)
+                .await;
+        }
+
+        if let Some(factory) = config.create_session_fs_handler.take() {
+            let provider = factory.call(&resumed_id);
+            session.register_session_fs_provider(provider).await;
+        }
 
         // Register hooks from config if provided
         if let Some(hooks) = config.hooks.take() {
@@ -1200,6 +1361,10 @@ impl Client {
             }
         }
 
+        if self.options.remote {
+            args.push("--remote".to_string());
+        }
+
         // Resolve command and arguments based on platform
         // On Windows, use cmd /c for PATH resolution if path is not absolute (for .cmd files)
         let (executable, full_args) = resolve_cli_command(&cli_path, &args);
@@ -1223,6 +1388,14 @@ impl Client {
 
         // Remove NODE_DEBUG to avoid debug output interfering with JSON-RPC
         proc_options = proc_options.env("NODE_DEBUG", "");
+
+        if let Some(token) = &self.options.tcp_connection_token {
+            proc_options = proc_options.env("COPILOT_CONNECTION_TOKEN", token);
+        }
+
+        if let Some(home) = &self.options.copilot_home {
+            proc_options = proc_options.env("COPILOT_HOME", home);
+        }
 
         // Wire github_token auth: pass via environment variable + CLI flag
         if let Some(ref token) = self.options.github_token {
@@ -1270,18 +1443,44 @@ impl Client {
 
     /// Verify that the server's protocol version is within the supported range
     /// and store the negotiated version.
+    ///
+    /// Sends the `connect` RPC first (with the configured `tcp_connection_token`
+    /// when present) and falls back to `ping` if the server returns
+    /// `-32601 Method not found` (legacy v2 servers).
     async fn verify_protocol_version(&self) -> Result<()> {
-        // NOTE: We call the underlying RPC directly instead of ping() because ping() calls
-        // ensure_connected(), but we haven't set state to Connected yet.
+        // NOTE: We call the underlying RPC directly instead of ping() because
+        // ping()/invoke() call ensure_connected(), but we haven't set state to
+        // Connected yet.
         let rpc = active_rpc_handle(&self.rpc).await?;
-        let result = rpc
-            .invoke("ping", Some(serde_json::json!({ "message": null })))
-            .await?;
 
-        let server_version = result
-            .get("protocolVersion")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+        let mut connect_params = serde_json::Map::new();
+        if let Some(token) = &self.options.tcp_connection_token {
+            connect_params.insert("token".into(), Value::String(token.clone()));
+        }
+
+        let server_version = match rpc
+            .invoke("connect", Some(Value::Object(connect_params)))
+            .await
+        {
+            Ok(result) => result
+                .get("protocolVersion")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            Err(CopilotError::JsonRpc { code, message, .. })
+                if code == -32601 || message == "Unhandled method connect" =>
+            {
+                // Legacy server without `connect`; fall back to `ping`. A
+                // configured token, if any, is silently dropped — the legacy
+                // server cannot enforce one anyway.
+                let ping = rpc
+                    .invoke("ping", Some(serde_json::json!({ "message": null })))
+                    .await?;
+                ping.get("protocolVersion")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32)
+            }
+            Err(e) => return Err(e),
+        };
 
         match server_version {
             None => {
@@ -1373,6 +1572,18 @@ impl Client {
                     "permission.request" => handle_permission_request(&sessions, &params).await,
                     "userInput.request" => handle_user_input_request(&sessions, &params).await,
                     "hooks.invoke" => handle_hooks_invoke(&sessions, &params).await,
+                    "exitPlanMode.request" => {
+                        handle_exit_plan_mode_request(&sessions, &params).await
+                    }
+                    "autoModeSwitch.request" => {
+                        handle_auto_mode_switch_request(&sessions, &params).await
+                    }
+                    "systemMessage.transform" => {
+                        handle_system_message_transform(&sessions, &params).await
+                    }
+                    m if m.starts_with("sessionFs.") => {
+                        handle_session_fs_request(&sessions, m, &params).await
+                    }
                     _ => {
                         return Err(JsonRpcError::new(
                             -32601,
@@ -1612,8 +1823,37 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the connection token used in the TCP `connect` handshake.
+    ///
+    /// When the SDK spawns the CLI in TCP mode, the token is also exported as
+    /// `COPILOT_CONNECTION_TOKEN` to the subprocess. Only valid when
+    /// [`ClientBuilder::use_stdio`] is `false`.
+    pub fn tcp_connection_token(mut self, token: impl Into<String>) -> Self {
+        self.options.tcp_connection_token = Some(token.into());
+        self
+    }
+
+    /// Override the CLI's `COPILOT_HOME` (base directory for session state /
+    /// config). Mirrors Python's `SubprocessConfig.copilot_home`.
+    pub fn copilot_home(mut self, home: impl Into<String>) -> Self {
+        self.options.copilot_home = Some(home.into());
+        self
+    }
+
+    /// Pass `--remote` to the CLI to enable Mission Control remote session
+    /// integration when running inside a GitHub repository working directory.
+    pub fn remote(mut self, enabled: bool) -> Self {
+        self.options.remote = enabled;
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
+        if self.options.tcp_connection_token.is_some() && self.options.use_stdio {
+            return Err(CopilotError::InvalidConfig(
+                "tcp_connection_token cannot be used with use_stdio = true".into(),
+            ));
+        }
         Client::new(self.options)
     }
 }
