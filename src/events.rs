@@ -248,6 +248,30 @@ pub struct AssistantMessageData {
     pub tool_requests: Option<Vec<ToolRequestItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_tool_call_id: Option<String>,
+    /// Encrypted reasoning blob (when the model produced one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    /// Interaction-level identifier for telemetry correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<String>,
+    /// Output token count inline on the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<f64>,
+    /// Phase string (e.g. `pre-tool` / `post-tool`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Opaque reasoning blob (o1-style).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_opaque: Option<String>,
+    /// Visible reasoning text (o1-style).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+    /// Per-request identifier for tracing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
+    /// Identifier of the conversation turn this message belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
 }
 
 /// Data for assistant.message_delta event.
@@ -295,6 +319,21 @@ pub struct AssistantUsageData {
     pub provider_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_snapshots: Option<HashMap<String, serde_json::Value>>,
+    /// Time between successive tokens, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_token_latency_ms: Option<f64>,
+    /// Token count for the model's reasoning output (o1-style).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<f64>,
+    /// Reasoning effort that was applied for this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    /// Time-to-first-token latency, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttft_ms: Option<f64>,
+    /// Copilot-specific billing/usage payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copilot_usage: Option<serde_json::Value>,
 }
 
 /// Data for abort event.
@@ -424,6 +463,19 @@ pub struct SystemMessageEventData {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SystemMessageMetadata>,
+}
+
+/// Data for `system.notification` event (added in Python SDK v0.2.0).
+///
+/// System-generated notification for runtime events like background task
+/// completion. `kind` is left as raw JSON to stay forward-compatible with new
+/// kinds added by the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemNotificationData {
+    pub content: String,
+    #[serde(default)]
+    pub kind: serde_json::Value,
 }
 
 /// Data for session.compaction_start event.
@@ -600,7 +652,11 @@ pub struct CommandExecuteData {
     pub args: Option<String>,
 }
 
-/// Data for `elicitation.request` event.
+/// Data for `elicitation.request` event (legacy alias, kept for back-compat).
+///
+/// Newer servers emit `elicitation.requested` with the schema captured by
+/// [`ElicitationRequestedData`]; that variant is the one routed to
+/// [`crate::types::ElicitationHandler`] in `Session::handle_broadcast_event`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ElicitationRequestData {
@@ -614,6 +670,37 @@ pub struct ElicitationRequestData {
     pub options: Option<Vec<serde_json::Value>>,
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
+}
+
+/// Data for `elicitation.requested` event (protocol v3 broadcast).
+///
+/// In protocol v3, the runtime broadcasts elicitation requests as
+/// session events. The SDK responds via `session.ui.handlePendingElicitation`.
+/// Mirrors Python's `ElicitationRequestedData`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ElicitationRequestedData {
+    /// Unique request ID for correlating the response.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Message describing what information is needed from the user.
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Elicitation source (e.g. MCP server name).
+    #[serde(default)]
+    pub elicitation_source: Option<String>,
+    /// Elicitation mode: `"form"` for structured input, `"url"` for browser redirect.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// JSON Schema describing the form fields to present.
+    #[serde(default)]
+    pub requested_schema: Option<serde_json::Value>,
+    /// Tool call ID this elicitation belongs to (when applicable).
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    /// URL to open in a browser (when `mode == "url"`).
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Data for `elicitation.response` event.
@@ -714,6 +801,8 @@ pub enum SessionEventData {
     HookStart(HookStartData),
     HookEnd(HookEndData),
     SystemMessage(SystemMessageEventData),
+    /// Runtime system notification (e.g. background task completion).
+    SystemNotification(SystemNotificationData),
     SessionCompactionStart(SessionCompactionStartData),
     SessionCompactionComplete(SessionCompactionCompleteData),
     SessionShutdown(SessionShutdownData),
@@ -726,8 +815,10 @@ pub enum SessionEventData {
     CommandComplete(CommandCompleteData),
     /// Slash command requested by the user (protocol v3 broadcast).
     CommandExecute(CommandExecuteData),
-    /// Elicitation request.
+    /// Elicitation request (legacy `elicitation.request` event).
     ElicitationRequest(ElicitationRequestData),
+    /// Elicitation requested (protocol v3 broadcast: `elicitation.requested`).
+    ElicitationRequested(ElicitationRequestedData),
     /// Elicitation response.
     ElicitationResponse(ElicitationResponseData),
     /// Session capabilities changed.
@@ -968,6 +1059,9 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
         "system.message" => serde_json::from_value(data)
             .map(SessionEventData::SystemMessage)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "system.notification" => serde_json::from_value(data)
+            .map(SessionEventData::SystemNotification)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "session.compaction_start" => {
             SessionEventData::SessionCompactionStart(SessionCompactionStartData {})
         }
@@ -989,7 +1083,7 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
         "command.start" => serde_json::from_value(data)
             .map(SessionEventData::CommandStart)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
-        "command.complete" => serde_json::from_value(data)
+        "command.complete" | "command.completed" => serde_json::from_value(data)
             .map(SessionEventData::CommandComplete)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "command.execute" => serde_json::from_value(data)
@@ -997,6 +1091,9 @@ fn parse_event_data(event_type: &str, data: serde_json::Value) -> SessionEventDa
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "elicitation.request" => serde_json::from_value(data)
             .map(SessionEventData::ElicitationRequest)
+            .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
+        "elicitation.requested" => serde_json::from_value(data)
+            .map(SessionEventData::ElicitationRequested)
             .unwrap_or_else(|_| SessionEventData::Unknown(serde_json::Value::Null)),
         "elicitation.response" => serde_json::from_value(data)
             .map(SessionEventData::ElicitationResponse)

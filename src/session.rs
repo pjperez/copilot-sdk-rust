@@ -32,6 +32,32 @@ use tokio::sync::{broadcast, RwLock};
 /// Handler for session events.
 pub type EventHandler = Arc<dyn Fn(&SessionEvent) + Send + Sync>;
 
+/// `Debug`-able newtype around an [`EventHandler`] so it can live in
+/// `Debug`-derived configs like [`crate::types::SessionConfig::on_event`].
+#[derive(Clone)]
+pub struct EventHandlerOpt(pub EventHandler);
+
+impl EventHandlerOpt {
+    /// Wrap a closure into an `EventHandlerOpt`.
+    pub fn new<F>(handler: F) -> Self
+    where
+        F: Fn(&SessionEvent) + Send + Sync + 'static,
+    {
+        Self(Arc::new(handler))
+    }
+
+    /// Borrow the underlying handler.
+    pub fn handler(&self) -> &EventHandler {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for EventHandlerOpt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EventHandlerOpt(fn)")
+    }
+}
+
 /// Handler for permission requests.
 pub type PermissionHandler =
     Arc<dyn Fn(&PermissionRequest) -> PermissionRequestResult + Send + Sync>;
@@ -186,8 +212,9 @@ struct SessionState {
 pub struct Session {
     /// Session ID.
     session_id: String,
-    /// Workspace path for infinite sessions.
-    workspace_path: Option<String>,
+    /// Workspace path for infinite sessions. Mutable so the create/resume
+    /// flow can fill it in after the runtime returns the path.
+    workspace_path: std::sync::RwLock<Option<String>>,
     /// Event broadcaster.
     event_tx: broadcast::Sender<SessionEvent>,
     /// Session state.
@@ -210,7 +237,7 @@ impl Session {
 
         Self {
             session_id,
-            workspace_path,
+            workspace_path: std::sync::RwLock::new(workspace_path),
             event_tx,
             state: Arc::new(RwLock::new(SessionState {
                 tools: HashMap::new(),
@@ -244,8 +271,16 @@ impl Session {
     ///
     /// Contains checkpoints/, plan.md, and files/ subdirectories.
     /// Returns None if infinite sessions are disabled.
-    pub fn workspace_path(&self) -> Option<&str> {
-        self.workspace_path.as_deref()
+    pub fn workspace_path(&self) -> Option<String> {
+        self.workspace_path.read().ok()?.clone()
+    }
+
+    /// Update the workspace path. Used by the client after `session.create` /
+    /// `session.resume` returns the runtime-assigned workspace.
+    pub async fn set_workspace_path(&self, path: String) {
+        if let Ok(mut guard) = self.workspace_path.write() {
+            *guard = Some(path);
+        }
     }
 
     /// Get capabilities reported by the runtime for this session.
@@ -296,6 +331,16 @@ impl Session {
                 state_ref.write().await.event_handlers.remove(&id);
             });
         }
+    }
+
+    /// Register a pre-built [`EventHandler`] Arc. Used by `Client::create_session`
+    /// to install [`crate::types::SessionConfig::on_event`] before the
+    /// `session.create` RPC fires so early events are not dropped.
+    pub async fn on_async(&self, handler: EventHandler) -> u64 {
+        let mut state = self.state.write().await;
+        let id = state.next_handler_id.fetch_add(1, Ordering::SeqCst);
+        state.event_handlers.insert(id, handler);
+        id
     }
 
     /// Unsubscribe a callback-based event handler.
@@ -510,6 +555,66 @@ impl Session {
                 {
                     tracing::warn!(
                         "Failed to respond to command request {} for session {}: {}",
+                        request_id,
+                        session_id,
+                        err
+                    );
+                }
+            }
+            SessionEventData::ElicitationRequested(data) => {
+                let request_id = match &data.request_id {
+                    Some(id) => id.clone(),
+                    None => return,
+                };
+
+                // Only respond if a handler is registered; otherwise the
+                // server may route to another client.
+                if !self.has_elicitation_handler().await {
+                    return;
+                }
+
+                let session_id = self.session_id.clone();
+
+                // Build an ElicitationParams shaped like the inbound RPC
+                // params expected by the existing `handle_elicitation_request`
+                // helper.
+                let elicitation_type = data.mode.clone().unwrap_or_else(|| "form".to_string());
+                let params = ElicitationParams {
+                    id: Some(request_id.clone()),
+                    elicitation_type,
+                    message: data.message.clone().unwrap_or_default(),
+                    options: None,
+                    schema: data.requested_schema.clone(),
+                    title: None,
+                };
+
+                let invoke_fn = Arc::clone(&self.invoke_fn);
+                let result = self.handle_elicitation_request(&params).await;
+
+                let response_action = match &result {
+                    Ok(r) => r.action.clone(),
+                    Err(_) => "cancel".to_string(),
+                };
+                let response_value = result.as_ref().ok().and_then(|r| r.value.clone());
+
+                let mut rpc_result = serde_json::json!({
+                    "action": response_action,
+                });
+                if let Some(content) = response_value {
+                    rpc_result["content"] = content;
+                }
+
+                let response_params = serde_json::json!({
+                    "sessionId": session_id,
+                    "requestId": request_id,
+                    "result": rpc_result,
+                });
+
+                if let Err(err) =
+                    (invoke_fn)("session.ui.handlePendingElicitation", Some(response_params)).await
+                {
+                    tracing::warn!(
+                        "Failed to respond to elicitation request {} for session {}: {}",
                         request_id,
                         session_id,
                         err
@@ -1011,14 +1116,20 @@ impl Session {
             },
             "sessionFs.stat" => match provider.stat(&path).await {
                 Ok(info) => Ok(serde_json::to_value(info).unwrap_or(Value::Null)),
-                Err(err) => Ok(serde_json::json!({
-                    "isFile": false,
-                    "isDirectory": false,
-                    "size": 0,
-                    "mtime": "",
-                    "birthtime": "",
-                    "error": err_to_json(&err),
-                })),
+                Err(err) => {
+                    // Use a valid ISO 8601 timestamp on error so callers
+                    // that eagerly parse the response don't blow up before
+                    // checking the `error` field. Mirrors Python.
+                    let now = chrono::Utc::now().to_rfc3339();
+                    Ok(serde_json::json!({
+                        "isFile": false,
+                        "isDirectory": false,
+                        "size": 0,
+                        "mtime": now,
+                        "birthtime": now,
+                        "error": err_to_json(&err),
+                    }))
+                }
             },
             "sessionFs.mkdir" => {
                 let recursive = params
@@ -1038,9 +1149,22 @@ impl Session {
                 })),
             },
             "sessionFs.readdirWithTypes" => match provider.readdir_with_types(&path).await {
-                Ok(entries) => Ok(serde_json::json!({
-                    "entries": serde_json::to_value(entries).unwrap_or(Value::Array(vec![])),
-                })),
+                Ok(entries) => {
+                    // Wire shape per upstream generated rpc: each entry is
+                    // `{name, type: "file" | "directory"}`. Map our boolean
+                    // is_file/is_directory pair to the canonical `type`.
+                    let wire_entries: Vec<serde_json::Value> = entries
+                        .iter()
+                        .map(|e| {
+                            let entry_type = if e.is_directory { "directory" } else { "file" };
+                            serde_json::json!({
+                                "name": e.name,
+                                "type": entry_type,
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::json!({ "entries": wire_entries }))
+                }
                 Err(err) => Ok(serde_json::json!({
                     "entries": [],
                     "error": err_to_json(&err),
@@ -1238,7 +1362,7 @@ impl Session {
             }
         }
 
-        (self.invoke_fn)("session.setModel", Some(params)).await?;
+        (self.invoke_fn)("session.model.switchTo", Some(params)).await?;
         Ok(())
     }
 
@@ -1740,7 +1864,7 @@ mod tests {
             Some("/tmp/workspace".to_string()),
             mock_invoke,
         );
-        assert_eq!(session.workspace_path(), Some("/tmp/workspace"));
+        assert_eq!(session.workspace_path(), Some("/tmp/workspace".to_string()));
     }
 
     #[tokio::test]
@@ -2191,5 +2315,217 @@ mod tests {
         }
         assert_eq!(wire_count_static, 1);
         assert_eq!(wire_count_transform, 1);
+    }
+
+    // ---- Phase 7 wire-format & dispatch regression tests ----
+
+    use std::sync::Mutex as StdMutex;
+
+    fn collecting_invoke(
+        record: Arc<StdMutex<Vec<(String, serde_json::Value)>>>,
+        response: serde_json::Value,
+    ) -> impl Fn(&str, Option<Value>) -> InvokeFuture + Send + Sync + 'static {
+        move |method: &str, params: Option<Value>| {
+            let record = Arc::clone(&record);
+            let method = method.to_string();
+            let params = params.unwrap_or(Value::Null);
+            let response = response.clone();
+            Box::pin(async move {
+                record.lock().unwrap().push((method, params));
+                Ok(response)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_model_uses_session_model_switch_to_rpc() {
+        let calls: Arc<StdMutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let session = Session::new(
+            "s".to_string(),
+            None,
+            collecting_invoke(Arc::clone(&calls), Value::Null),
+        );
+        session.set_model("gpt-4", None, None).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "session.model.switchTo");
+        assert_eq!(calls[0].1["model"], "gpt-4");
+    }
+
+    #[tokio::test]
+    async fn test_command_completed_alias_parses() {
+        // Both wire spellings should round-trip into CommandComplete (Python
+        // emits the trailing-d form).
+        let new_form = serde_json::json!({
+            "id": "1",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "type": "command.completed",
+            "data": {"commandName": "deploy", "success": true},
+        });
+        let event = SessionEvent::from_json(&new_form).unwrap();
+        assert!(matches!(event.data, SessionEventData::CommandComplete(_)));
+    }
+
+    #[tokio::test]
+    async fn test_elicitation_requested_routes_to_handler_and_responds() {
+        use crate::types::ElicitationResult;
+
+        let calls: Arc<StdMutex<Vec<(String, serde_json::Value)>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        let session = Arc::new(Session::new(
+            "s".to_string(),
+            None,
+            collecting_invoke(Arc::clone(&calls), Value::Null),
+        ));
+
+        session
+            .register_elicitation_handler(Arc::new(|_ctx| {
+                ElicitationResult::accept(serde_json::json!({"confirmed": true}))
+            }))
+            .await;
+
+        let raw = serde_json::json!({
+            "id": "1",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "type": "elicitation.requested",
+            "data": {
+                "requestId": "req-1",
+                "message": "ok?",
+                "mode": "form",
+            },
+        });
+        let event = SessionEvent::from_json(&raw).unwrap();
+        assert!(matches!(
+            event.data,
+            SessionEventData::ElicitationRequested(_)
+        ));
+        session.dispatch_event(event).await;
+
+        let calls = calls.lock().unwrap();
+        let handle_call = calls
+            .iter()
+            .find(|(m, _)| m == "session.ui.handlePendingElicitation")
+            .expect("expected handlePendingElicitation RPC");
+        assert_eq!(handle_call.1["sessionId"], "s");
+        assert_eq!(handle_call.1["requestId"], "req-1");
+        assert_eq!(handle_call.1["result"]["action"], "accept");
+    }
+
+    #[tokio::test]
+    async fn test_session_fs_readdir_with_types_wire_shape() {
+        use crate::session_fs::{
+            SessionFsError, SessionFsFileInfo, SessionFsProvider, SessionFsProviderEntry,
+        };
+        use async_trait::async_trait;
+
+        struct Fake;
+        #[async_trait]
+        impl SessionFsProvider for Fake {
+            async fn read_file(&self, _: &str) -> std::result::Result<String, SessionFsError> {
+                unreachable!()
+            }
+            async fn write_file(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<u32>,
+            ) -> std::result::Result<(), SessionFsError> {
+                unreachable!()
+            }
+            async fn append_file(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<u32>,
+            ) -> std::result::Result<(), SessionFsError> {
+                unreachable!()
+            }
+            async fn exists(&self, _: &str) -> std::result::Result<bool, SessionFsError> {
+                unreachable!()
+            }
+            async fn stat(
+                &self,
+                _: &str,
+            ) -> std::result::Result<SessionFsFileInfo, SessionFsError> {
+                Err(SessionFsError::enoent("missing"))
+            }
+            async fn mkdir(
+                &self,
+                _: &str,
+                _: bool,
+                _: Option<u32>,
+            ) -> std::result::Result<(), SessionFsError> {
+                unreachable!()
+            }
+            async fn readdir(&self, _: &str) -> std::result::Result<Vec<String>, SessionFsError> {
+                unreachable!()
+            }
+            async fn readdir_with_types(
+                &self,
+                _: &str,
+            ) -> std::result::Result<Vec<SessionFsProviderEntry>, SessionFsError> {
+                Ok(vec![
+                    SessionFsProviderEntry {
+                        name: "a.txt".into(),
+                        is_file: true,
+                        is_directory: false,
+                    },
+                    SessionFsProviderEntry {
+                        name: "child".into(),
+                        is_file: false,
+                        is_directory: true,
+                    },
+                ])
+            }
+            async fn rm(
+                &self,
+                _: &str,
+                _: bool,
+                _: bool,
+            ) -> std::result::Result<(), SessionFsError> {
+                unreachable!()
+            }
+            async fn rename(&self, _: &str, _: &str) -> std::result::Result<(), SessionFsError> {
+                unreachable!()
+            }
+        }
+
+        let session = Session::new("s".to_string(), None, mock_invoke);
+        session.register_session_fs_provider(Arc::new(Fake)).await;
+
+        let response = session
+            .handle_session_fs_request(
+                "sessionFs.readdirWithTypes",
+                &serde_json::json!({"sessionId": "s", "path": "/x"}),
+            )
+            .await
+            .unwrap();
+        let entries = response["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "a.txt");
+        assert_eq!(entries[0]["type"], "file");
+        assert!(entries[0].get("isFile").is_none());
+        assert_eq!(entries[1]["name"], "child");
+        assert_eq!(entries[1]["type"], "directory");
+
+        // stat error must surface ISO timestamps, not empty strings.
+        let stat_response = session
+            .handle_session_fs_request(
+                "sessionFs.stat",
+                &serde_json::json!({"sessionId": "s", "path": "/missing"}),
+            )
+            .await
+            .unwrap();
+        let mtime = stat_response["mtime"].as_str().unwrap();
+        let birthtime = stat_response["birthtime"].as_str().unwrap();
+        assert!(!mtime.is_empty(), "mtime should be a valid timestamp");
+        assert!(
+            !birthtime.is_empty(),
+            "birthtime should be a valid timestamp"
+        );
+        assert!(chrono::DateTime::parse_from_rfc3339(mtime).is_ok());
+        assert_eq!(stat_response["error"]["code"], "ENOENT");
     }
 }
