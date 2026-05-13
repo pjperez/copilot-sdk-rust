@@ -1067,6 +1067,12 @@ pub struct SessionConfig {
     #[serde(skip)]
     pub create_session_fs_handler: Option<crate::session::CreateSessionFsHandler>,
 
+    /// Optional event handler registered before `session.create` is issued so
+    /// early events such as `session.start` are guaranteed to be delivered.
+    /// Mirrors Python's `SessionConfig.on_event`.
+    #[serde(skip)]
+    pub on_event: Option<crate::session::EventHandlerOpt>,
+
     /// Whether to discover config files such as MCP server configs from the working directory.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_config_discovery: Option<bool>,
@@ -1219,6 +1225,11 @@ pub struct ResumeSessionConfig {
     /// Per-session FS provider factory invoked after the session is resumed.
     #[serde(skip)]
     pub create_session_fs_handler: Option<crate::session::CreateSessionFsHandler>,
+
+    /// Optional event handler registered before `session.resume` is issued so
+    /// early events are guaranteed to be delivered. Mirrors Python.
+    #[serde(skip)]
+    pub on_event: Option<crate::session::EventHandlerOpt>,
 }
 
 /// Options for sending a message.
@@ -1325,6 +1336,13 @@ pub struct ClientOptions {
     /// If true, passes `--remote` to enable Mission Control remote session
     /// integration when the working directory is inside a GitHub repository.
     pub remote: bool,
+
+    /// Connection-level session filesystem provider configuration. When set,
+    /// the client sends `sessionFs.setProvider` after startup so the runtime
+    /// routes inbound `sessionFs.*` callbacks to the SDK. Without this,
+    /// per-session [`crate::session::CreateSessionFsHandler`] factories are
+    /// installed locally but the runtime never calls into them.
+    pub session_fs: Option<SessionFsSetProviderRequest>,
 }
 
 impl Default for ClientOptions {
@@ -1350,6 +1368,7 @@ impl Default for ClientOptions {
             tcp_connection_token: None,
             copilot_home: None,
             remote: false,
+            session_fs: None,
         }
     }
 }

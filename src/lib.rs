@@ -213,6 +213,7 @@ pub use events::{
     CustomAgentSelectedData,
     CustomAgentStartedData,
     ElicitationRequestData,
+    ElicitationRequestedData,
     ElicitationResponseData,
     HandoffSourceType,
     HookEndData,
@@ -243,6 +244,7 @@ pub use events::{
     SystemMessageEventData,
     SystemMessageMetadata,
     SystemMessageRole,
+    SystemNotificationData,
     ToolExecutionCompleteData,
     ToolExecutionError,
     ToolExecutionPartialResultData,
@@ -277,8 +279,8 @@ pub use session_fs::{
 
 // Re-export session types
 pub use session::{
-    CreateSessionFsHandler, EventHandler, EventSubscription, InvokeFuture, PermissionHandler,
-    RegisteredTool, Session, SessionUi, ToolHandler, UserInputHandler,
+    CreateSessionFsHandler, EventHandler, EventHandlerOpt, EventSubscription, InvokeFuture,
+    PermissionHandler, RegisteredTool, Session, SessionUi, ToolHandler, UserInputHandler,
 };
 
 // Re-export client types

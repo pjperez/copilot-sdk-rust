@@ -434,19 +434,32 @@ async fn handle_system_message_transform(
 
 /// Lower a `Vec<SectionOverride>` into `system_message.sections` and return
 /// the extracted transform callbacks keyed by section id.
+/// Lower a `Vec<SectionOverride>` into `system_message.sections` and return
+/// the extracted transform callbacks keyed by section id.
+///
+/// Returns `Err` if the caller passed a non-empty `section_overrides` while
+/// also setting `system_message.mode` to anything other than `Customize` —
+/// the runtime would silently ignore the overrides in that case.
 fn lower_section_overrides(
     system_message: &mut Option<crate::types::SystemMessageConfig>,
     overrides: Option<Vec<crate::types::SectionOverride>>,
-) -> HashMap<String, crate::types::SectionTransformFn> {
+) -> Result<HashMap<String, crate::types::SectionTransformFn>> {
     let mut callbacks = HashMap::new();
     let overrides = match overrides {
         Some(v) if !v.is_empty() => v,
-        _ => return callbacks,
+        _ => return Ok(callbacks),
     };
 
     let cfg = system_message.get_or_insert_with(crate::types::SystemMessageConfig::default);
-    if cfg.mode.is_none() {
-        cfg.mode = Some(crate::types::SystemMessageMode::Customize);
+    match cfg.mode {
+        Some(crate::types::SystemMessageMode::Customize) | None => {
+            cfg.mode = Some(crate::types::SystemMessageMode::Customize);
+        }
+        Some(other) => {
+            return Err(CopilotError::InvalidConfig(format!(
+                "section_overrides require system_message.mode = Customize, but got {other:?}"
+            )));
+        }
     }
 
     let map = cfg.sections.get_or_insert_with(HashMap::new);
@@ -458,7 +471,7 @@ fn lower_section_overrides(
         }
         map.insert(key, wire);
     }
-    callbacks
+    Ok(callbacks)
 }
 
 /// Handle an `autoModeSwitch.request` callback from the CLI server.
@@ -668,6 +681,13 @@ pub struct Client {
     next_lifecycle_handler_id: AtomicU64,
     models_cache: Arc<Mutex<Option<Vec<ModelInfo>>>>,
     negotiated_protocol_version: Arc<Mutex<Option<u32>>>,
+    /// Live TCP port the CLI server is listening on. Set after `start()` for
+    /// TCP transports; `None` for stdio. Mirrors Python's `actual_port`.
+    actual_port: Arc<Mutex<Option<u16>>>,
+    /// Optional override for `list_models()` — when set, returns this list
+    /// instead of issuing the `models.list` RPC. Useful for BYOK callers that
+    /// have a static catalog. Mirrors Python's `on_list_models` constructor arg.
+    on_list_models: Option<Arc<dyn Fn() -> Vec<ModelInfo> + Send + Sync>>,
 }
 
 impl Client {
@@ -720,6 +740,8 @@ impl Client {
             next_lifecycle_handler_id: AtomicU64::new(1),
             models_cache: Arc::new(Mutex::new(None)),
             negotiated_protocol_version: Arc::new(Mutex::new(None)),
+            actual_port: Arc::new(Mutex::new(None)),
+            on_list_models: None,
         })
     }
 
@@ -764,7 +786,40 @@ impl Client {
         // Set up event handlers
         self.setup_handlers().await?;
 
+        // Advertise the SDK as the session-FS provider, if configured.
+        // Without this RPC the runtime keeps using its internal storage and
+        // never routes inbound `sessionFs.*` callbacks into the SDK.
+        if let Some(fs_cfg) = self.options.session_fs.clone() {
+            if let Err(e) = self.set_session_fs_provider(&fs_cfg).await {
+                *self.state.write().await = ConnectionState::Error;
+                return Err(e);
+            }
+        }
+
         *self.state.write().await = ConnectionState::Connected;
+        Ok(())
+    }
+
+    /// Send `sessionFs.setProvider` so the CLI routes inbound FS callbacks
+    /// (`sessionFs.readFile`, `sessionFs.writeFile`, …) into the SDK's
+    /// per-session [`crate::session::CreateSessionFsHandler`] providers.
+    async fn set_session_fs_provider(
+        &self,
+        config: &crate::types::SessionFsSetProviderRequest,
+    ) -> Result<()> {
+        if config.initial_cwd.trim().is_empty() {
+            return Err(CopilotError::InvalidConfig(
+                "session_fs.initial_cwd is required".into(),
+            ));
+        }
+        if config.session_state_path.trim().is_empty() {
+            return Err(CopilotError::InvalidConfig(
+                "session_fs.session_state_path is required".into(),
+            ));
+        }
+        let params = serde_json::to_value(config)?;
+        let rpc = active_rpc_handle(&self.rpc).await?;
+        rpc.invoke("sessionFs.setProvider", Some(params)).await?;
         Ok(())
     }
 
@@ -861,31 +916,76 @@ impl Client {
         // Lower section_overrides into system_message.sections and capture
         // any transform callbacks for later dispatch via systemMessage.transform.
         let transform_callbacks =
-            lower_section_overrides(&mut config.system_message, config.section_overrides.take());
+            lower_section_overrides(&mut config.system_message, config.section_overrides.take())?;
 
-        // Build the request
+        // Pre-generate the session id so we can install local handlers and
+        // register the session in the map BEFORE issuing session.create.
+        // Otherwise early callbacks (`systemMessage.transform`,
+        // `sessionFs.*`, `command.execute`, etc.) can race the response.
+        let session_id = config
+            .session_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        config.session_id = Some(session_id.clone());
+
+        // Build the session object up front and pre-install all local
+        // dispatchers so that callbacks observed during create() succeed.
+        let session = self.create_session_object(session_id.clone(), None).await;
+
+        let on_event = config.on_event.take();
+        let commands = config.commands.clone();
+        let fs_factory = config.create_session_fs_handler.take();
+        let hooks = config.hooks.take();
+
+        if !transform_callbacks.is_empty() {
+            session
+                .register_transform_callbacks(transform_callbacks)
+                .await;
+        }
+        if let Some(cmds) = commands {
+            session.register_commands(cmds).await;
+        }
+        if let Some(factory) = fs_factory {
+            let provider = factory.call(&session_id);
+            session.register_session_fs_provider(provider).await;
+        }
+        if let Some(hooks) = hooks {
+            if hooks.has_any() {
+                session.register_hooks(hooks).await;
+            }
+        }
+        if let Some(handler) = on_event {
+            session.on_async(handler.0).await;
+        }
+
+        // Insert into the routing map BEFORE issuing the RPC. Roll back on failure.
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.clone(), Arc::clone(&session));
+
         let params = serde_json::to_value(&config)?;
 
-        // Send the request
-        let result = self.invoke("session.create", Some(params)).await?;
+        let result = match self.invoke("session.create", Some(params)).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.sessions.write().await.remove(&session_id);
+                return Err(e);
+            }
+        };
 
-        // Extract session ID
-        let session_id = result
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| CopilotError::Protocol("Missing sessionId in response".into()))?
-            .to_string();
-
-        // Extract workspace_path (for infinite sessions)
-        let workspace_path = result
-            .get("workspacePath")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Create session object
-        let session = self
-            .create_session_object(session_id.clone(), workspace_path)
-            .await;
+        // Reconcile fields the runtime owns (workspacePath, capabilities,
+        // and the canonical session id if the runtime renamed it).
+        if let Some(returned_id) = result.get("sessionId").and_then(|v| v.as_str()) {
+            if returned_id != session_id {
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(&session_id);
+                sessions.insert(returned_id.to_string(), Arc::clone(&session));
+            }
+        }
+        if let Some(wp) = result.get("workspacePath").and_then(|v| v.as_str()) {
+            session.set_workspace_path(wp.to_string()).await;
+        }
         let capabilities = result
             .get("capabilities")
             .cloned()
@@ -895,30 +995,6 @@ impl Client {
                 CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
             })?;
         session.set_capabilities(capabilities).await;
-
-        if !transform_callbacks.is_empty() {
-            session
-                .register_transform_callbacks(transform_callbacks)
-                .await;
-        }
-
-        if let Some(factory) = config.create_session_fs_handler.take() {
-            let provider = factory.call(&session_id);
-            session.register_session_fs_provider(provider).await;
-        }
-
-        // Register hooks from config if provided
-        if let Some(hooks) = config.hooks.take() {
-            if hooks.has_any() {
-                session.register_hooks(hooks).await;
-            }
-        }
-
-        // Store session
-        self.sessions
-            .write()
-            .await
-            .insert(session_id, Arc::clone(&session));
 
         Ok(session)
     }
@@ -941,32 +1017,67 @@ impl Client {
         config.env_value_mode.get_or_insert_with(|| "direct".into());
 
         let transform_callbacks =
-            lower_section_overrides(&mut config.system_message, config.section_overrides.take());
+            lower_section_overrides(&mut config.system_message, config.section_overrides.take())?;
 
-        // Build the request
+        // Pre-register the session before issuing session.resume so any
+        // immediate callbacks (transform, sessionFs.*, command.execute,
+        // permission, user-input, hooks.invoke) reach the right session.
+        let session = self
+            .create_session_object(session_id.to_string(), None)
+            .await;
+
+        let on_event = config.on_event.take();
+        let commands = config.commands.clone();
+        let fs_factory = config.create_session_fs_handler.take();
+        let hooks = config.hooks.take();
+
+        if !transform_callbacks.is_empty() {
+            session
+                .register_transform_callbacks(transform_callbacks)
+                .await;
+        }
+        if let Some(cmds) = commands {
+            session.register_commands(cmds).await;
+        }
+        if let Some(factory) = fs_factory {
+            let provider = factory.call(session_id);
+            session.register_session_fs_provider(provider).await;
+        }
+        if let Some(hooks) = hooks {
+            if hooks.has_any() {
+                session.register_hooks(hooks).await;
+            }
+        }
+        if let Some(handler) = on_event {
+            session.on_async(handler.0).await;
+        }
+
+        self.sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), Arc::clone(&session));
+
         let mut params = serde_json::to_value(&config)?;
         params["sessionId"] = json!(session_id);
 
-        // Send the request
-        let result = self.invoke("session.resume", Some(params)).await?;
+        let result = match self.invoke("session.resume", Some(params)).await {
+            Ok(r) => r,
+            Err(e) => {
+                self.sessions.write().await.remove(session_id);
+                return Err(e);
+            }
+        };
 
-        // Extract session ID from response
-        let resumed_id = result
-            .get("sessionId")
-            .and_then(|v| v.as_str())
-            .unwrap_or(session_id)
-            .to_string();
-
-        // Extract workspace_path (for infinite sessions)
-        let workspace_path = result
-            .get("workspacePath")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        // Create session object
-        let session = self
-            .create_session_object(resumed_id.clone(), workspace_path)
-            .await;
+        if let Some(returned_id) = result.get("sessionId").and_then(|v| v.as_str()) {
+            if returned_id != session_id {
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(session_id);
+                sessions.insert(returned_id.to_string(), Arc::clone(&session));
+            }
+        }
+        if let Some(wp) = result.get("workspacePath").and_then(|v| v.as_str()) {
+            session.set_workspace_path(wp.to_string()).await;
+        }
         let capabilities = result
             .get("capabilities")
             .cloned()
@@ -976,30 +1087,6 @@ impl Client {
                 CopilotError::Protocol(format!("Failed to parse session capabilities: {}", e))
             })?;
         session.set_capabilities(capabilities).await;
-
-        if !transform_callbacks.is_empty() {
-            session
-                .register_transform_callbacks(transform_callbacks)
-                .await;
-        }
-
-        if let Some(factory) = config.create_session_fs_handler.take() {
-            let provider = factory.call(&resumed_id);
-            session.register_session_fs_provider(provider).await;
-        }
-
-        // Register hooks from config if provided
-        if let Some(hooks) = config.hooks.take() {
-            if hooks.has_any() {
-                session.register_hooks(hooks).await;
-            }
-        }
-
-        // Store session
-        self.sessions
-            .write()
-            .await
-            .insert(resumed_id, Arc::clone(&session));
 
         Ok(session)
     }
@@ -1011,9 +1098,12 @@ impl Client {
     ) -> Result<Vec<SessionMetadata>> {
         self.ensure_connected().await?;
 
+        // Python wraps filter as { "filter": { ... } } — the runtime ignores
+        // unwrapped fields, so the filter must be nested.
         let params = filter
             .and_then(|f| serde_json::to_value(f).ok())
-            .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()));
+            .filter(|v| v.as_object().is_some_and(|m| !m.is_empty()))
+            .map(|filter_value| serde_json::json!({ "filter": filter_value }));
 
         let result = self.invoke("session.list", params).await?;
 
@@ -1129,6 +1219,12 @@ impl Client {
     /// # Errors
     /// Returns an error if not authenticated or if the request fails.
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        // Caller-supplied static catalog overrides the wire RPC. Mirrors
+        // Python's `on_list_models` constructor argument.
+        if let Some(provider) = &self.on_list_models {
+            return Ok(provider());
+        }
+
         // Check cache first
         {
             let cache = self.models_cache.lock().await;
@@ -1152,6 +1248,25 @@ impl Client {
         *self.models_cache.lock().await = Some(models.clone());
 
         Ok(models)
+    }
+
+    /// Live TCP port the CLI server is listening on.
+    ///
+    /// Returns `None` when stdio transport is in use or before [`Client::start`]
+    /// has connected. Mirrors Python's `actual_port` property.
+    pub async fn actual_port(&self) -> Option<u16> {
+        *self.actual_port.lock().await
+    }
+
+    /// Override the result of [`Client::list_models`] with a static list
+    /// produced by `provider`. Useful for BYOK callers that don't want the
+    /// SDK to issue the `models.list` RPC. Mirrors Python's
+    /// `on_list_models` constructor argument.
+    pub fn set_on_list_models<F>(&mut self, provider: F)
+    where
+        F: Fn() -> Vec<ModelInfo> + Send + Sync + 'static,
+    {
+        self.on_list_models = Some(Arc::new(provider));
     }
 
     /// Clear the cached models list, forcing a fresh fetch on next `list_models()` call.
@@ -1422,6 +1537,7 @@ impl Client {
             })?;
             let rpc = StdioJsonRpcClient::new(transport);
             rpc.start().await?;
+            *self.actual_port.lock().await = None;
             RpcClient::Stdio(rpc)
         } else {
             let stdout = process.take_stdout().ok_or_else(|| {
@@ -1432,6 +1548,7 @@ impl Client {
             let addr = format!("127.0.0.1:{}", detected_port);
             let rpc = TcpJsonRpcClient::connect(addr).await?;
             rpc.start().await?;
+            *self.actual_port.lock().await = Some(detected_port);
             RpcClient::Tcp(rpc)
         };
 
@@ -1847,6 +1964,15 @@ impl ClientBuilder {
         self
     }
 
+    /// Configure the connection-level session-FS provider. Required for
+    /// per-session [`crate::session::CreateSessionFsHandler`] factories to
+    /// receive runtime callbacks; the client sends `sessionFs.setProvider`
+    /// after startup using these values.
+    pub fn session_fs(mut self, config: crate::types::SessionFsSetProviderRequest) -> Self {
+        self.options.session_fs = Some(config);
+        self
+    }
+
     /// Build the client.
     pub fn build(self) -> Result<Client> {
         if self.options.tcp_connection_token.is_some() && self.options.use_stdio {
@@ -2024,5 +2150,57 @@ mod tests {
             "arguments": "{not valid json"
         });
         assert_eq!(normalize_tool_arguments(&params), json!({}));
+    }
+
+    #[test]
+    fn test_lower_section_overrides_rejects_non_customize_mode() {
+        use crate::types::{
+            SectionOverride, SectionOverrideAction, SystemMessageConfig, SystemMessageMode,
+            SystemPromptSection,
+        };
+
+        let mut sm = Some(SystemMessageConfig {
+            mode: Some(SystemMessageMode::Append),
+            content: Some("extra".into()),
+            sections: None,
+        });
+        let result = lower_section_overrides(
+            &mut sm,
+            Some(vec![SectionOverride {
+                section: SystemPromptSection::Tone,
+                action: SectionOverrideAction::Replace("be terse".into()),
+            }]),
+        );
+        match result {
+            Err(CopilotError::InvalidConfig(msg)) => {
+                assert!(msg.contains("Customize"), "unexpected error: {msg}");
+            }
+            Err(e) => panic!("expected InvalidConfig, got {e}"),
+            Ok(_) => panic!("expected InvalidConfig, got Ok"),
+        }
+    }
+
+    #[test]
+    fn test_lower_section_overrides_promotes_customize_when_mode_unset() {
+        use crate::types::{
+            SectionOverride, SectionOverrideAction, SystemMessageConfig, SystemMessageMode,
+            SystemPromptSection,
+        };
+
+        let mut sm: Option<SystemMessageConfig> = None;
+        let callbacks = lower_section_overrides(
+            &mut sm,
+            Some(vec![SectionOverride {
+                section: SystemPromptSection::Tone,
+                action: SectionOverrideAction::Replace("be terse".into()),
+            }]),
+        )
+        .unwrap();
+        assert!(callbacks.is_empty());
+        let cfg = sm.unwrap();
+        assert!(matches!(cfg.mode, Some(SystemMessageMode::Customize)));
+        let sections = cfg.sections.unwrap();
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections.get("tone").unwrap().action, "replace");
     }
 }

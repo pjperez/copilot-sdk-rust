@@ -213,9 +213,22 @@ let config = SessionConfig {
 ### Server-Side Filesystem Provider (`SessionFsProvider`)
 
 Implement [`SessionFsProvider`] to host a custom session-state filesystem that the
-runtime calls back into. Wire it via `SessionConfig::create_session_fs_handler`:
+runtime calls back into. Two parts are required:
+
+1. **Client-level**: tell the runtime the SDK owns the FS via `sessionFs.setProvider`
+   by setting `ClientOptions::session_fs` (or `ClientBuilder::session_fs(...)`).
+2. **Per-session**: register a factory via `SessionConfig::create_session_fs_handler`
+   that returns a `SharedSessionFsProvider` for each new/resumed session.
 
 ```rust
+let client = Client::builder()
+    .session_fs(SessionFsSetProviderRequest {
+        initial_cwd: "/workspace".into(),
+        session_state_path: ".copilot-sessions".into(),
+        conventions: SessionFsConventions::Posix,
+    })
+    .build()?;
+
 let factory = CreateSessionFsHandler::new(|_session_id| -> SharedSessionFsProvider {
     Arc::new(MyFsBackend::new())
 });
@@ -225,6 +238,9 @@ let session = client.create_session(SessionConfig {
     ..Default::default()
 }).await?;
 ```
+
+Without the client-level `session_fs` config, the runtime keeps using its internal
+storage and the per-session factory is never invoked.
 
 ### Connect Handshake & TCP Connection Token
 

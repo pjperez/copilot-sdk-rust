@@ -41,6 +41,7 @@ which = "7"
 
 schemars = { version = "0.8", optional = true, features = ["derive"] }
 async-trait = "0.1.89"
+uuid = { version = "1.23.1", features = ["v4"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

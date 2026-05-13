@@ -10,8 +10,9 @@
 use async_trait::async_trait;
 use copilot_sdk::{
     Client, CreateSessionFsHandler, Result, SessionConfig, SessionFsError, SessionFsFileInfo,
-    SessionFsProvider, SessionFsProviderEntry, SharedSessionFsProvider,
+    SessionFsProvider, SessionFsProviderEntry, SessionFsSetProviderRequest, SharedSessionFsProvider,
 };
+use copilot_sdk::types::SessionFsConventions;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -131,7 +132,20 @@ impl SessionFsProvider for InMemoryFs {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let client = Client::builder().build()?;
+    // The runtime must be told the SDK is the FS provider — without
+    // `sessionFs.setProvider`, inbound `sessionFs.*` callbacks are never sent.
+    let client = Client::builder()
+        .session_fs(SessionFsSetProviderRequest {
+            initial_cwd: std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| ".".into()),
+            session_state_path: ".copilot-sessions".into(),
+            #[cfg(target_os = "windows")]
+            conventions: SessionFsConventions::Windows,
+            #[cfg(not(target_os = "windows"))]
+            conventions: SessionFsConventions::Posix,
+        })
+        .build()?;
     client.start().await?;
 
     let factory =
