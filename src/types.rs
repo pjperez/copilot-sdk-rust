@@ -1535,10 +1535,92 @@ pub struct ModelPolicy {
 }
 
 /// Model billing information.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelBilling {
     #[serde(default)]
     pub multiplier: f64,
+
+    /// Per-tier token prices (e.g. `default` vs `long_context`).
+    ///
+    /// Some models — notably GPT-5.5 — expose multiple billing tiers
+    /// under this key, each with its own `context_max` and per-million
+    /// token prices. Clients can pair a tier's `context_max` with
+    /// [`ModelLimitsOverride::max_context_window_tokens`] to opt into
+    /// the longer (and more expensive) tier when creating or resuming
+    /// a session, mirroring the CLI's `/context` picker.
+    ///
+    /// Older models (and any model without per-tier pricing) omit this
+    /// key, so it is `None` by default to keep parsing backward
+    /// compatible.
+    #[serde(default)]
+    pub token_prices: Option<ModelTokenPrices>,
+
+    /// Plan tiers the model is restricted to (e.g. `pro_plus`,
+    /// `business`, `enterprise`, `max`). Empty / absent when the model
+    /// is available to everyone.
+    #[serde(default)]
+    pub restricted_to: Option<Vec<String>>,
+}
+
+/// Per-tier token prices reported under [`ModelBilling::token_prices`].
+///
+/// Fields mirror the wire format returned by Copilot's `/models`
+/// endpoint, e.g. for GPT-5.5:
+///
+/// ```json
+/// "token_prices": {
+///   "batch_size": 1000000,
+///   "default":      { "cache_price": 50,  "context_max": 272000,  "input_price": 500,  "output_price": 3000 },
+///   "long_context": { "cache_price": 100, "context_max": 1050000, "input_price": 1000, "output_price": 4500 }
+/// }
+/// ```
+///
+/// Every field is optional so unknown shapes still round-trip. Use
+/// [`Self::default`] / [`Self::long_context`] to render a context-window
+/// picker and translate the user's choice into
+/// [`ModelLimitsOverride::max_context_window_tokens`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelTokenPrices {
+    /// Batch size the per-million prices are quoted for (typically 1_000_000).
+    #[serde(default)]
+    pub batch_size: Option<u64>,
+
+    /// Default tier — the model's standard context window.
+    #[serde(default)]
+    pub default: Option<ModelTokenPriceTier>,
+
+    /// Long-context tier — opts into the larger window and pricing.
+    #[serde(default)]
+    pub long_context: Option<ModelTokenPriceTier>,
+}
+
+/// A single billing tier within [`ModelTokenPrices`].
+///
+/// All fields are optional so the type tolerates partial or evolving
+/// server responses; in practice GPT-5.5 reports all four (`cache_price`,
+/// `context_max`, `input_price`, `output_price`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelTokenPriceTier {
+    /// Price per `batch_size` cached input tokens.
+    #[serde(default)]
+    pub cache_price: Option<f64>,
+
+    /// Hard ceiling on the prompt context window for this tier (tokens).
+    /// Pair with [`ModelLimitsOverride::max_context_window_tokens`] to
+    /// pin a session to this tier.
+    #[serde(default)]
+    pub context_max: Option<u32>,
+
+    /// Price per `batch_size` input tokens.
+    #[serde(default)]
+    pub input_price: Option<f64>,
+
+    /// Price per `batch_size` output tokens.
+    #[serde(default)]
+    pub output_price: Option<f64>,
 }
 
 /// Information about an available model.
@@ -2620,6 +2702,107 @@ mod tests {
         assert_eq!(json["envValueMode"], "direct");
         assert_eq!(json["requestElicitation"], true);
         assert_eq!(json["enableConfigDiscovery"], false);
+    }
+
+    // ── ModelBilling per-tier prices ─────────────────────────────────
+
+    /// Verbatim slice of the GPT-5.5 billing payload captured from the
+    /// `/models` response. Pinning this exact JSON guards against silent
+    /// upstream shape changes — if Copilot reshapes the payload, the
+    /// test breaks loud rather than the picker silently disappearing
+    /// from downstream UIs.
+    const GPT_5_5_BILLING_JSON: &str = r#"{
+        "is_premium": true,
+        "multiplier": 1.0,
+        "restricted_to": ["pro_plus", "business", "enterprise", "max"],
+        "token_prices": {
+            "batch_size": 1000000,
+            "default":      { "cache_price": 50,  "context_max": 272000,  "input_price": 500,  "output_price": 3000 },
+            "long_context": { "cache_price": 100, "context_max": 1050000, "input_price": 1000, "output_price": 4500 }
+        }
+    }"#;
+
+    #[test]
+    fn test_model_billing_deserializes_token_price_tiers() {
+        let billing: ModelBilling =
+            serde_json::from_str(GPT_5_5_BILLING_JSON).expect("billing JSON must parse");
+
+        assert_eq!(billing.multiplier, 1.0);
+        assert_eq!(
+            billing.restricted_to.as_deref(),
+            Some(&["pro_plus".to_string(), "business".to_string(), "enterprise".to_string(), "max".to_string()][..])
+        );
+
+        let prices = billing.token_prices.expect("token_prices must be present");
+        assert_eq!(prices.batch_size, Some(1_000_000));
+
+        let default = prices.default.expect("default tier must be present");
+        assert_eq!(default.context_max, Some(272_000));
+        assert_eq!(default.input_price, Some(500.0));
+        assert_eq!(default.output_price, Some(3000.0));
+        assert_eq!(default.cache_price, Some(50.0));
+
+        let long = prices.long_context.expect("long_context tier must be present");
+        assert_eq!(long.context_max, Some(1_050_000));
+        assert_eq!(long.input_price, Some(1000.0));
+        assert_eq!(long.output_price, Some(4500.0));
+        assert_eq!(long.cache_price, Some(100.0));
+    }
+
+    #[test]
+    fn test_model_billing_handles_missing_token_prices() {
+        // Older models report only `multiplier` — the new fields must
+        // default to `None` rather than fail parsing.
+        let billing: ModelBilling =
+            serde_json::from_str(r#"{"multiplier": 2.5}"#).expect("legacy billing must parse");
+        assert_eq!(billing.multiplier, 2.5);
+        assert!(billing.token_prices.is_none());
+        assert!(billing.restricted_to.is_none());
+    }
+
+    #[test]
+    fn test_model_billing_tolerates_partial_tier() {
+        // Only `context_max` is populated; remaining tier fields stay None.
+        let json = r#"{
+            "multiplier": 1.0,
+            "token_prices": {
+                "default": { "context_max": 200000 }
+            }
+        }"#;
+        let billing: ModelBilling = serde_json::from_str(json).unwrap();
+        let prices = billing.token_prices.unwrap();
+        let default = prices.default.unwrap();
+        assert_eq!(default.context_max, Some(200_000));
+        assert_eq!(default.input_price, None);
+        assert_eq!(default.output_price, None);
+        assert_eq!(default.cache_price, None);
+        assert!(prices.long_context.is_none());
+    }
+
+    #[test]
+    fn test_model_info_with_token_prices_round_trips_through_models_endpoint_shape() {
+        // Mirrors a single entry from the `/models` response so we catch
+        // any future field collision (e.g. `billing` becoming required
+        // upstream).
+        let json = format!(
+            r#"{{
+                "id": "gpt-5.5",
+                "name": "GPT-5.5",
+                "capabilities": {{
+                    "family": "gpt-5.5",
+                    "limits": {{ "max_context_window_tokens": 1050000 }},
+                    "supports": {{ "streaming": true }},
+                    "type": "chat",
+                    "tokenizer": "cl100k_base"
+                }},
+                "billing": {GPT_5_5_BILLING_JSON}
+            }}"#
+        );
+        let info: ModelInfo = serde_json::from_str(&json).expect("ModelInfo must parse");
+        assert_eq!(info.id, "gpt-5.5");
+        let billing = info.billing.expect("billing must round-trip");
+        let prices = billing.token_prices.expect("token_prices must round-trip");
+        assert_eq!(prices.long_context.unwrap().context_max, Some(1_050_000));
     }
 
     #[test]
