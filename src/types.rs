@@ -1276,11 +1276,64 @@ pub struct ModelPolicy {
     pub terms: String,
 }
 
+/// Token pricing for a specific context-window tier (e.g. `default` or `long_context`).
+///
+/// Models that expose multiple context windows (such as GPT-5.5, which has both a
+/// 272K-token "default" tier and a 1.05M-token "long_context" tier with different
+/// per-token prices) advertise the per-tier pricing under
+/// `ModelBilling.token_prices`. Use this to render a context-window picker and to
+/// look up the `context_max` you should pass back via
+/// [`ModelLimitsOverride::max_context_window_tokens`].
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelTokenPriceTier {
+    /// Hard ceiling on the prompt context window for this tier (in tokens).
+    #[serde(default)]
+    pub context_max: Option<u32>,
+    /// Per-million-token input price for this tier (in vendor credits).
+    #[serde(default)]
+    pub input_price: Option<f64>,
+    /// Per-million-token output price for this tier (in vendor credits).
+    #[serde(default)]
+    pub output_price: Option<f64>,
+    /// Per-million-token cached-input price for this tier (in vendor credits).
+    #[serde(default)]
+    pub cache_price: Option<f64>,
+}
+
+/// Per-tier token-price map for a model.
+///
+/// The well-known tier keys today are `default` and `long_context` (mirroring the
+/// CLI's "Select Context Window for <model>" picker). Unknown tier names are
+/// silently ignored; both known tiers are optional so the struct gracefully
+/// deserialises older or simpler `/models` responses.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ModelTokenPrices {
+    /// Pricing/limits for the default (smaller, cheaper) context tier.
+    #[serde(default)]
+    pub default: Option<ModelTokenPriceTier>,
+    /// Pricing/limits for the optional long-context tier.
+    #[serde(default)]
+    pub long_context: Option<ModelTokenPriceTier>,
+    /// Batch size in tokens the prices are quoted per (typically `1_000_000`).
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+}
+
 /// Model billing information.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub struct ModelBilling {
     #[serde(default)]
     pub multiplier: f64,
+    /// Per-tier token prices and context-window ceilings, when the model exposes
+    /// more than one context-window option.
+    #[serde(default)]
+    pub token_prices: Option<ModelTokenPrices>,
+    /// Plan tiers the model is restricted to (e.g. `["pro_plus", "business"]`).
+    #[serde(default)]
+    pub restricted_to: Option<Vec<String>>,
 }
 
 /// Information about an available model.
@@ -2051,6 +2104,51 @@ mod tests {
         };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["reasoningEffort"], "high");
+    }
+
+    #[test]
+    fn test_model_billing_deserializes_token_price_tiers() {
+        let j = serde_json::json!({
+            "multiplier": 0.0,
+            "restricted_to": ["pro_plus", "business", "enterprise", "max"],
+            "token_prices": {
+                "batch_size": 1_000_000,
+                "default": {
+                    "cache_price": 50,
+                    "context_max": 272_000,
+                    "input_price": 500,
+                    "output_price": 3000
+                },
+                "long_context": {
+                    "cache_price": 100,
+                    "context_max": 1_050_000,
+                    "input_price": 1000,
+                    "output_price": 4500
+                }
+            }
+        });
+        let billing: ModelBilling = serde_json::from_value(j).unwrap();
+        assert_eq!(
+            billing.restricted_to.as_deref(),
+            Some(&["pro_plus".to_string(), "business".to_string(), "enterprise".to_string(), "max".to_string()][..])
+        );
+        let prices = billing.token_prices.expect("token_prices");
+        assert_eq!(prices.batch_size, Some(1_000_000));
+        let default_tier = prices.default.expect("default tier");
+        assert_eq!(default_tier.context_max, Some(272_000));
+        assert_eq!(default_tier.input_price, Some(500.0));
+        let long = prices.long_context.expect("long_context tier");
+        assert_eq!(long.context_max, Some(1_050_000));
+        assert_eq!(long.output_price, Some(4500.0));
+    }
+
+    #[test]
+    fn test_model_billing_handles_missing_token_prices() {
+        let j = serde_json::json!({"multiplier": 1.5});
+        let billing: ModelBilling = serde_json::from_value(j).unwrap();
+        assert_eq!(billing.multiplier, 1.5);
+        assert!(billing.token_prices.is_none());
+        assert!(billing.restricted_to.is_none());
     }
 
     #[test]
