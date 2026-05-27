@@ -988,6 +988,16 @@ pub struct SessionConfig {
     /// System prompt section overrides for granular prompt customization.
     #[serde(skip)]
     pub section_overrides: Option<Vec<SectionOverride>>,
+
+    /// Override for model capabilities/limits, mirroring the CLI's
+    /// `/context` picker. Forwarded to the server as
+    /// `modelCapabilitiesOverride` and used to opt into per-tier billing
+    /// (e.g. GPT-5.5 Long context). `None` keeps the model's defaults.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "modelCapabilitiesOverride"
+    )]
+    pub model_capabilities: Option<ModelCapabilitiesOverride>,
 }
 
 /// Configuration for resuming an existing session.
@@ -1042,6 +1052,17 @@ pub struct ResumeSessionConfig {
     /// Default: false (explicit configuration preferred over environment variables)
     #[serde(skip)]
     pub auto_byok_from_env: bool,
+
+    /// Override for model capabilities/limits, mirroring the CLI's
+    /// `/context` picker. Forwarded to the server as
+    /// `modelCapabilitiesOverride` so the resumed session picks up the
+    /// user's chosen billing tier. `None` keeps whatever override the
+    /// session was created with.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        rename = "modelCapabilitiesOverride"
+    )]
+    pub model_capabilities: Option<ModelCapabilitiesOverride>,
 }
 
 /// Options for sending a message.
@@ -2179,6 +2200,63 @@ mod tests {
         };
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(json["model"], "gpt-4");
+    }
+
+    #[test]
+    fn test_session_config_model_capabilities_override_serializes_as_camel_case() {
+        let config = SessionConfig {
+            model: Some("gpt-5.5".into()),
+            model_capabilities: Some(ModelCapabilitiesOverride {
+                limits: Some(ModelLimitsOverride {
+                    max_context_window_tokens: Some(272_000),
+                    max_prompt_tokens: Some(144_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            json.get("modelCapabilitiesOverride").is_some(),
+            "expected modelCapabilitiesOverride key in serialized SessionConfig, got: {json}"
+        );
+        let override_json = &json["modelCapabilitiesOverride"];
+        assert_eq!(override_json["limits"]["maxContextWindowTokens"], 272_000);
+        assert_eq!(override_json["limits"]["maxPromptTokens"], 144_000);
+    }
+
+    #[test]
+    fn test_session_config_omits_model_capabilities_when_none() {
+        let config = SessionConfig {
+            model: Some("gpt-5.5".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(
+            json.get("modelCapabilitiesOverride").is_none(),
+            "modelCapabilitiesOverride should be omitted when unset"
+        );
+    }
+
+    #[test]
+    fn test_resume_session_config_serializes_model_capabilities() {
+        let config = ResumeSessionConfig {
+            model: Some("gpt-5.5".into()),
+            model_capabilities: Some(ModelCapabilitiesOverride {
+                limits: Some(ModelLimitsOverride {
+                    max_context_window_tokens: Some(1_050_000),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json["modelCapabilitiesOverride"]["limits"]["maxContextWindowTokens"],
+            1_050_000
+        );
     }
 
     #[test]
