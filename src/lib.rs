@@ -279,8 +279,9 @@ pub use session_fs::{
 
 // Re-export session types
 pub use session::{
-    CreateSessionFsHandler, EventHandler, EventHandlerOpt, EventSubscription, InvokeFuture,
-    PermissionHandler, RegisteredTool, Session, SessionUi, ToolHandler, UserInputHandler,
+    map_permission_result_to_cli_decision, CreateSessionFsHandler, EventHandler, EventHandlerOpt,
+    EventSubscription, InvokeFuture, PermissionHandler, RegisteredTool, Session, SessionUi,
+    ToolHandler, UserInputHandler,
 };
 
 // Re-export client types

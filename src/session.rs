@@ -225,6 +225,49 @@ pub struct Session {
     capabilities: Arc<RwLock<Option<SessionCapabilities>>>,
 }
 
+/// Map internal [`PermissionRequestResult`] values to the legacy
+/// `PermissionDecision` shape expected by
+/// `session.permissions.handlePendingPermissionRequest` in Copilot CLI
+/// 1.0.39+.
+///
+/// The CLI's zod schema (`PermissionDecision`) accepts only these `kind`
+/// values: `approve-once`, `approve-for-session`, `approve-for-location`,
+/// `reject`, `user-not-available`. Sending the raw v3 `{kind: "approved"}`
+/// or `{kind: "denied-…"}` shape causes the CLI to throw
+/// `unexpected user permission response` from its dispatcher when the
+/// permission flows through the permission service that 1.0.39+ wires up
+/// via `ensurePermissionService()`.
+///
+/// This mapping existed in rev `5ab451c` and was lost during the
+/// Python-SDK catch-up in #8 / #9. See
+/// `broadcast_permission_response_uses_legacy_decision_kinds_for_cli_1039`
+/// for the regression test.
+pub fn map_permission_result_to_cli_decision(
+    result: &crate::types::PermissionRequestResult,
+) -> serde_json::Value {
+    let mut inner = match result.kind.as_str() {
+        "approved" => serde_json::json!({ "kind": "approve-once" }),
+        "denied-no-approval-rule-and-could-not-request-from-user" => {
+            serde_json::json!({ "kind": "user-not-available" })
+        }
+        "denied-interactively-by-user" => serde_json::json!({ "kind": "reject" }),
+        other if other.starts_with("denied") => serde_json::json!({ "kind": "reject" }),
+        // Pass-through for kinds that already match the legacy shape so
+        // callers can opt into those directly without going through the
+        // mapping.
+        "approve-once"
+        | "approve-for-session"
+        | "approve-for-location"
+        | "reject"
+        | "user-not-available" => serde_json::json!({ "kind": result.kind.clone() }),
+        _ => serde_json::json!({ "kind": "reject" }),
+    };
+    if let Some(rules) = &result.rules {
+        inner["rules"] = serde_json::json!(rules);
+    }
+    inner
+}
+
 impl Session {
     /// Create a new session.
     ///
@@ -479,12 +522,7 @@ impl Session {
 
                 let result = self.handle_permission_request(&request).await;
 
-                let mut perm_result_inner = serde_json::json!({
-                    "kind": result.kind,
-                });
-                if let Some(rules) = &result.rules {
-                    perm_result_inner["rules"] = serde_json::json!(rules);
-                }
+                let perm_result_inner = map_permission_result_to_cli_decision(&result);
                 let perm_result = serde_json::json!({
                     "sessionId": session_id,
                     "requestId": request_id,
@@ -2527,5 +2565,188 @@ mod tests {
         );
         assert!(chrono::DateTime::parse_from_rfc3339(mtime).is_ok());
         assert_eq!(stat_response["error"]["code"], "ENOENT");
+    }
+
+    // ── REGRESSION TESTS for CLI 1.0.39+ permission wire shape ────────
+    //
+    // The CLI's `PermissionDecision` zod schema (used by
+    // `session.permissions.handlePendingPermissionRequest`) only accepts
+    // these `kind` values:
+    //   approve-once, approve-for-session, approve-for-location,
+    //   reject, user-not-available.
+    //
+    // The internal `PermissionRequestResult.kind` values
+    // (`"approved"` / `"denied-…"`) must be mapped to the legacy
+    // PermissionDecision shape before being sent over the wire. The
+    // Python-SDK catch-up in #8 / #9 dropped this mapping in
+    // `handle_broadcast_event`, which caused CLI 1.0.39+ users to see
+    // `unexpected user permission response` and every native tool
+    // (powershell/grep/view/edit) to fail with "unexpected user
+    // permission response" on the model side.
+
+    #[test]
+    fn map_permission_result_approved_yields_approve_once_for_cli_1039() {
+        let mapped = map_permission_result_to_cli_decision(&PermissionRequestResult::approved());
+        assert_eq!(
+            mapped,
+            serde_json::json!({"kind": "approve-once"}),
+            "approved must be mapped to approve-once for CLI 1.0.39+ \
+             PermissionDecision schema, NOT sent raw as 'approved'"
+        );
+    }
+
+    #[test]
+    fn map_permission_result_default_denied_yields_user_not_available_for_cli_1039() {
+        let mapped = map_permission_result_to_cli_decision(&PermissionRequestResult::denied());
+        assert_eq!(
+            mapped,
+            serde_json::json!({"kind": "user-not-available"}),
+            "default denial must be user-not-available for CLI 1.0.39+ \
+             PermissionDecision schema"
+        );
+    }
+
+    #[test]
+    fn map_permission_result_interactive_denial_yields_reject_for_cli_1039() {
+        let result = PermissionRequestResult {
+            kind: "denied-interactively-by-user".to_string(),
+            rules: None,
+        };
+        let mapped = map_permission_result_to_cli_decision(&result);
+        assert_eq!(mapped, serde_json::json!({"kind": "reject"}));
+    }
+
+    #[test]
+    fn map_permission_result_other_denial_falls_through_to_reject() {
+        let result = PermissionRequestResult {
+            kind: "denied-by-policy".to_string(),
+            rules: None,
+        };
+        let mapped = map_permission_result_to_cli_decision(&result);
+        assert_eq!(mapped, serde_json::json!({"kind": "reject"}));
+    }
+
+    #[test]
+    fn map_permission_result_passes_through_legacy_decision_kinds() {
+        for kind in [
+            "approve-once",
+            "approve-for-session",
+            "approve-for-location",
+            "reject",
+            "user-not-available",
+        ] {
+            let result = PermissionRequestResult {
+                kind: kind.to_string(),
+                rules: None,
+            };
+            let mapped = map_permission_result_to_cli_decision(&result);
+            assert_eq!(
+                mapped,
+                serde_json::json!({"kind": kind}),
+                "legacy decision kind `{kind}` must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn map_permission_result_preserves_rules_alongside_decision_kind() {
+        let result = PermissionRequestResult {
+            kind: "approved".to_string(),
+            rules: Some(vec![serde_json::json!({"id": "rule-1"})]),
+        };
+        let mapped = map_permission_result_to_cli_decision(&result);
+        assert_eq!(
+            mapped,
+            serde_json::json!({
+                "kind": "approve-once",
+                "rules": [{"id": "rule-1"}]
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_permission_response_uses_legacy_decision_kinds_for_cli_1039() {
+        // End-to-end: dispatching a `permission.requested` broadcast event
+        // through Session::dispatch_event must produce an
+        // `session.permissions.handlePendingPermissionRequest` RPC whose
+        // `params.result.kind` is `approve-once` (NOT `approved`).
+        //
+        // This test captures the wire shape that goes to the CLI. If the
+        // mapping in handle_broadcast_event is ever dropped again, this
+        // test fails before anyone has to debug "unexpected user permission
+        // response" in production.
+
+        use std::sync::Mutex;
+
+        #[derive(Clone)]
+        struct CapturedCall {
+            method: String,
+            params: Option<Value>,
+        }
+
+        let captured: Arc<Mutex<Vec<CapturedCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_invoke = captured.clone();
+
+        let session = Session::new(
+            "test-session".to_string(),
+            None,
+            move |method: &str, params: Option<Value>| -> InvokeFuture {
+                let captured = captured_for_invoke.clone();
+                let method = method.to_string();
+                Box::pin(async move {
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(CapturedCall { method, params });
+                    Ok(serde_json::json!({}))
+                })
+            },
+        );
+
+        session
+            .register_permission_handler(|_req| PermissionRequestResult::approved())
+            .await;
+
+        let event = SessionEvent::from_json(&serde_json::json!({
+            "id": "evt-perm-1",
+            "timestamp": "2024-01-01T00:00:00Z",
+            "type": "permission.requested",
+            "data": {
+                "requestId": "req-perm-abc",
+                "permissionRequest": {
+                    "kind": "tool",
+                    "toolCallId": "tc-1"
+                }
+            }
+        }))
+        .expect("event should parse");
+
+        session.dispatch_event(event).await;
+
+        let calls = captured.lock().unwrap().clone();
+        let perm_call = calls
+            .iter()
+            .find(|c| c.method == "session.permissions.handlePendingPermissionRequest")
+            .expect(
+                "broadcast handler must invoke session.permissions.handlePendingPermissionRequest",
+            );
+        let params = perm_call
+            .params
+            .as_ref()
+            .expect("permission RPC must have params");
+        let kind = params
+            .get("result")
+            .and_then(|r| r.get("kind"))
+            .and_then(|k| k.as_str())
+            .expect("params.result.kind must be a string");
+        assert_eq!(
+            kind,
+            "approve-once",
+            "CLI 1.0.39+ PermissionDecision zod schema rejects \
+             `approved`; broadcast handler must map it to `approve-once`. \
+             If this test fails, every native tool (powershell/grep/view/edit) \
+             will fail with `unexpected user permission response` in production. \
+             See SDK rev 5ab451c (lost in #8/#9 Python-SDK catch-up) for context."
+        );
     }
 }
