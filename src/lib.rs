@@ -1,7 +1,12 @@
 // Copyright (c) 2026 Elias Bachaalany
 // SPDX-License-Identifier: MIT
 
-#![forbid(unsafe_code)]
+// Crate-wide policy: no unsafe code outside of narrowly-scoped, audited
+// modules that opt in via `#[allow(unsafe_code)]`. The only current opt-in
+// is the Win32 Job Object wrapper in `process::job`, needed to kill the
+// embedded CLI's MCP-server grandchildren atomically on Windows (where
+// TerminateProcess otherwise orphans them).
+#![deny(unsafe_code)]
 
 //! # Copilot SDK for Rust
 //!

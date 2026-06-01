@@ -1,6 +1,6 @@
 [package]
 name = "copilot-sdk"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -56,6 +56,23 @@ default = []
 e2e = []  # Enable E2E tests that require real Copilot CLI
 snapshots = [] # Enable snapshot-based conformance tests
 schemars = ["dep:schemars"] # Derive tool JSON schemas from Rust types
+
+# ── Platform-specific deps for process-tree cleanup ────────────────────
+# On Windows we wrap the embedded CLI subprocess in a Win32 Job Object
+# (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) so its MCP-server grandchildren are
+# killed atomically when the SDK drops/force_stops the CLI. TerminateProcess
+# on the CLI alone leaks every grandchild it spawned. On Unix we use a
+# dedicated process group + killpg for the equivalent guarantee.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
