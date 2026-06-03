@@ -133,6 +133,36 @@ fn spawn_cli_stderr_logger(stderr: tokio::process::ChildStderr) {
 /// Handler for client-level lifecycle events (session created, deleted, etc.).
 pub type LifecycleHandler = Arc<dyn Fn(&SessionLifecycleEvent) + Send + Sync>;
 
+/// Dispatch a `session.event` notification (protocol v3 broadcast model).
+///
+/// IMPORTANT: this clones the `Arc<Session>` out of the map and DROPS the
+/// `sessions` read guard before calling `dispatch_event`. For v3, tool calls
+/// arrive as broadcast events, and `dispatch_event` -> `handle_broadcast_event`
+/// invokes the tool handler inline. A handler may re-enter this `Client` to
+/// `create_session` (which needs `sessions.write()`). Holding the read guard
+/// across that await self-deadlocks, and because tokio's `RwLock` is
+/// write-preferring, the queued writer then stalls every other session's
+/// incoming events behind it — freezing all sessions. Every other handler
+/// (e.g. `handle_tool_call`) clones the session out first; this path must too.
+async fn dispatch_session_event(
+    sessions: &RwLock<HashMap<String, Arc<Session>>>,
+    params: &Value,
+) {
+    let session_id = match params.get("sessionId").and_then(|v| v.as_str()) {
+        Some(id) => id,
+        None => return,
+    };
+    // Clone + drop the read guard before dispatching (see doc comment above).
+    let session = sessions.read().await.get(session_id).cloned();
+    if let Some(session) = session {
+        if let Some(event_data) = params.get("event") {
+            if let Ok(event) = SessionEvent::from_json(event_data) {
+                session.dispatch_event(event).await;
+            }
+        }
+    }
+}
+
 /// Handle a tool.call request from the server.
 async fn handle_tool_call(
     sessions: &RwLock<HashMap<String, Arc<Session>>>,
@@ -1643,15 +1673,7 @@ impl Client {
 
                 // Spawn a task to handle the event
                 tokio::spawn(async move {
-                    if let Some(session_id) = params.get("sessionId").and_then(|v| v.as_str()) {
-                        if let Some(session) = sessions.read().await.get(session_id) {
-                            if let Some(event_data) = params.get("event") {
-                                if let Ok(event) = SessionEvent::from_json(event_data) {
-                                    session.dispatch_event(event).await;
-                                }
-                            }
-                        }
-                    }
+                    dispatch_session_event(&sessions, &params).await;
                 });
             } else if method == "session.lifecycle" {
                 let lifecycle_handlers = Arc::clone(&lifecycle_handlers);
@@ -2202,5 +2224,84 @@ mod tests {
         let sections = cfg.sections.unwrap();
         assert_eq!(sections.len(), 1);
         assert_eq!(sections.get("tone").unwrap().action, "replace");
+    }
+
+    /// Regression test for the v3 `session.event` lock convoy: dispatching a
+    /// broadcast tool event must NOT hold the `sessions` map read guard while
+    /// the tool handler runs, because a handler may re-enter the same `Client`
+    /// and need `sessions.write()` (e.g. `create_session` for sub-agents).
+    /// Holding the read guard across that await self-deadlocks and freezes all
+    /// sessions. Multi-threaded runtime is required because the handler uses
+    /// `block_in_place`, mirroring real synchronous tool handlers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dispatch_session_event_releases_sessions_lock_before_tool_invoke() {
+        use crate::{Session, Tool, ToolHandler, ToolResultObject};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn mock_invoke(_method: &str, _params: Option<Value>) -> crate::InvokeFuture {
+            Box::pin(async { Ok(json!({"messageId": "test"})) })
+        }
+
+        let sessions: Arc<RwLock<HashMap<String, Arc<Session>>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let handler_ran = Arc::new(AtomicBool::new(false));
+
+        // Tool handler that re-enters the sessions map and takes the WRITE lock,
+        // exactly as `dispatch_subagents` does via `client.create_session`.
+        let sessions_weak = Arc::downgrade(&sessions);
+        let ran = Arc::clone(&handler_ran);
+        let handler: ToolHandler = Arc::new(move |_name: &str, _args: &Value| {
+            if let Some(map) = sessions_weak.upgrade() {
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        // Pre-fix this would hang forever: the dispatch path held
+                        // the read guard, so this write could never be acquired.
+                        let _w = map.write().await;
+                    });
+                });
+            }
+            ran.store(true, Ordering::SeqCst);
+            ToolResultObject::text("done".to_string())
+        });
+
+        let session = Session::new("sess-1".to_string(), None, mock_invoke);
+        session
+            .register_tool_with_handler(Tool::new("reentrant_tool"), Some(handler))
+            .await;
+        sessions
+            .write()
+            .await
+            .insert("sess-1".to_string(), Arc::new(session));
+
+        let params = json!({
+            "sessionId": "sess-1",
+            "event": {
+                "id": "evt-1",
+                "timestamp": "2024-01-01T00:00:00Z",
+                "type": "external_tool.requested",
+                "data": {
+                    "requestId": "req-1",
+                    "toolName": "reentrant_tool",
+                    "toolCallId": "call-1",
+                    "arguments": {}
+                }
+            }
+        });
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            dispatch_session_event(&sessions, &params),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "dispatch_session_event deadlocked: it held the sessions read lock \
+             across a tool handler that needs the write lock"
+        );
+        assert!(
+            handler_ran.load(Ordering::SeqCst),
+            "tool handler did not run"
+        );
     }
 }
